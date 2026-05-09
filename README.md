@@ -5,10 +5,10 @@ Robyn, serializacao rapida com `msgspec`, calculo vetorial com NumPy e
 gerenciamento de dependencias com `uv`.
 
 O projeto esta estruturado para manter o Python como camada de orquestracao da
-API e deixar o trabalho pesado concentrado em arrays compactos. A primeira
-versao usa kNN exato sobre vetores quantizados em `uint8`; essa base ja reduz o
-uso de memoria e deixa um caminho claro para trocar o miolo de busca por ANN/IVF
-sem mudar o contrato HTTP.
+API e deixar o trabalho pesado concentrado em arrays compactos. A busca usa um
+indice IVF-flat: os vetores sao quantizados em `uint8`, agrupados por centroides
+no build e, em runtime, a API busca apenas nas celulas mais proximas antes de
+fazer rerank exato dos candidatos.
 
 ## Caracteristicas
 
@@ -17,7 +17,7 @@ sem mudar o contrato HTTP.
 - Vetorizacao da transacao para 14 dimensoes.
 - Indice de referencias pre-processado em arquivos NumPy.
 - Vetores quantizados de `float32` para `uint8` para reduzir memoria.
-- Busca kNN exata em blocos, evitando alocar uma matriz gigante por request.
+- Busca ANN/IVF com rerank exato em poucos milhares de candidatos por request.
 - `docker-compose.yml` com Nginx + duas instancias da API.
 - Dependencias e lockfile gerenciados por `uv`.
 - Testes unitarios e de handlers da API com `pytest`.
@@ -37,10 +37,10 @@ nginx :9999
 ```
 
 Cada instancia da API carrega o indice de referencias no startup. Se o indice
-ainda nao existir, a aplicacao tenta cria-lo a partir de
-`resources/references.json.gz`. Na ausencia do dataset oficial, ela usa
-`resources/example-references.json`, que existe apenas para desenvolvimento e
-testes locais.
+nao existir ou estiver stale em relacao ao arquivo de referencias, a aplicacao
+tenta cria-lo a partir de `resources/references.json.gz`. Na ausencia do dataset
+oficial, ela usa `resources/example-references.json`, que existe apenas para
+desenvolvimento e testes locais.
 
 ## Fluxo da Requisicao
 
@@ -58,6 +58,7 @@ quantiza o vetor da consulta
   |
   v
 busca os 5 vizinhos mais proximos no indice
+  |   (somente nas celulas IVF mais proximas)
   |
   v
 calcula fraud_score
@@ -164,6 +165,9 @@ Arquivos gerados:
 ```text
 resources/index/vectors.u1.npy
 resources/index/labels.u1.npy
+resources/index/centroids.f32.npy
+resources/index/offsets.i8.npy
+resources/index/index.json
 ```
 
 `resources/index/` e ignorado pelo Git porque e artefato gerado.
@@ -200,20 +204,27 @@ docker compose config
 | --- | --- | --- |
 | `RINHA_RESOURCES_DIR` | `resources` | Diretorio com configs e dataset |
 | `RINHA_INDEX_DIR` | `resources/index` | Diretorio dos arquivos de indice |
+| `RINHA_IVF_CELLS` | `4096` | Numero de centroides/celulas gerados no build |
+| `RINHA_IVF_NPROBE` | `1` | Numero de celulas consultadas por request quando ha fallback para rerank |
+| `RINHA_IVF_SAMPLE` | `50000` | Amostra usada para treinar os centroides |
+| `RINHA_IVF_ITERATIONS` | `4` | Iteracoes de k-means sobre a amostra |
+| `RINHA_CELL_FAST_MARGIN` | `0.4` | Atalho por maioria da celula para regioes muito puras |
 | `ROBYN_HOST` | definido no compose | Host do servidor Robyn |
 | `ROBYN_PORT` | definido no compose | Porta do servidor Robyn |
+| `ROBYN_LOG_LEVEL` | `WARN` | Reduz logs no benchmark |
+| `ROBYN_PROCESSES` | `2` | Processos por instancia da API |
+| `ROBYN_WORKERS` | `2` | Workers por processo da API |
 
 ## Pontos de Evolucao
 
-O principal gargalo futuro e a busca vetorial. A implementacao atual e uma base
-compacta e previsivel, mas ainda faz kNN exato em blocos. Para perseguir p99
-abaixo de 30ms com o dataset completo, os proximos passos naturais sao:
+O principal gargalo era a busca vetorial exata sobre o dataset completo. A
+implementacao atual ja aplica o caminho ANN/IVF; os proximos passos naturais
+sao medir qualidade e ajustar o compromisso entre recall e latencia:
 
-- criar um indice ANN/IVF com centroides;
-- buscar apenas nas celulas mais proximas;
-- fazer rerank exato em poucos milhares de candidatos;
 - medir recall versus latencia usando uma amostra do dataset oficial;
-- ajustar quantizacao, threshold e numero de candidatos.
+- ajustar `RINHA_IVF_CELLS`, `RINHA_IVF_NPROBE` e threshold;
+- testar centroides maiores/menores conforme o limite de memoria;
+- comparar o score final contra o load test completo.
 
 Arquivos mais importantes para essa evolucao:
 

@@ -7,7 +7,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     OPENBLAS_NUM_THREADS=1 \
     MKL_NUM_THREADS=1 \
     NUMEXPR_NUM_THREADS=1 \
-    VECLIB_MAXIMUM_THREADS=1
+    VECLIB_MAXIMUM_THREADS=1 \
+    VIRTUAL_ENV=/app/.venv \
+    PATH="/app/.venv/bin:$PATH"
 
 WORKDIR /app
 
@@ -30,4 +32,4 @@ RUN if [ -f /app/resources/references.json.gz ]; then \
 
 EXPOSE 8080
 
-CMD ["uv", "run", "--no-sync", "python", "-m", "rinha_api.app"]
+CMD ["python", "-m", "rinha_api.app"]

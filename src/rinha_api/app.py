@@ -1,12 +1,28 @@
+import os
+
 import msgspec
 from robyn import Request, Response, Robyn
+from robyn.argument_parser import Config
 
 from rinha_api.config import index_dir, load_json_or_default, resources_dir
-from rinha_api.index import LABELS_FILE, QUANTIZED_FILE, VectorIndex, build_index, empty_index, load_index
+from rinha_api.index import (
+    LABELS_FILE,
+    QUANTIZED_FILE,
+    VectorIndex,
+    build_index,
+    empty_index,
+    index_matches_source,
+    load_index,
+)
 from rinha_api.vectorize import DEFAULT_MCC_RISK, DEFAULT_NORMALIZATION, vectorize_payload
 
 
-app = Robyn(__file__)
+config = Config()
+config.log_level = os.getenv("ROBYN_LOG_LEVEL", "WARN")
+config.processes = int(os.getenv("ROBYN_PROCESSES", "1"))
+config.workers = int(os.getenv("ROBYN_WORKERS", "4"))
+
+app = Robyn(__file__, config=config)
 decoder = msgspec.json.Decoder()
 encoder = msgspec.json.Encoder()
 
@@ -24,11 +40,12 @@ def initialize() -> None:
     _normalization = load_json_or_default(resources / "normalization.json", DEFAULT_NORMALIZATION)
     _mcc_risk = load_json_or_default(resources / "mcc_risk.json", DEFAULT_MCC_RISK)
 
-    if not (idx_dir / QUANTIZED_FILE).exists() or not (idx_dir / LABELS_FILE).exists():
-        references = resources / "references.json.gz"
-        if not references.exists():
-            references = resources / "example-references.json"
-        if references.exists():
+    references = resources / "references.json.gz"
+    if not references.exists():
+        references = resources / "example-references.json"
+
+    if references.exists():
+        if not index_matches_source(idx_dir, references):
             build_index(references, idx_dir)
 
     if (idx_dir / QUANTIZED_FILE).exists() and (idx_dir / LABELS_FILE).exists():

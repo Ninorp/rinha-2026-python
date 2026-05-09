@@ -1,4 +1,4 @@
-from rinha_api.vectorize import DEFAULT_MCC_RISK, DEFAULT_NORMALIZATION, vectorize_payload
+from rinha_api.vectorize import DEFAULT_MCC_RISK, DEFAULT_NORMALIZATION, parse_utc_timestamp_metrics, vectorize_payload
 
 
 def test_vectorizes_payload_from_rules_example() -> None:
@@ -29,3 +29,11 @@ def test_vectorizes_payload_from_rules_example() -> None:
         0.15000000596046448,
         0.006025000009685755,
     ]
+
+
+def test_fast_timestamp_parser_matches_datetime_fallback() -> None:
+    seconds, hour, weekday = parse_utc_timestamp_metrics("2026-03-11T18:45:53Z")
+
+    assert seconds == 1773254753.0
+    assert hour == 18
+    assert weekday == 2

@@ -47,6 +47,32 @@ def parse_utc_timestamp(value: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def parse_utc_timestamp_metrics(value: str) -> tuple[float, int, int]:
+    if len(value) >= 20 and value[4] == "-" and value[7] == "-" and value[10] == "T" and value[19] == "Z":
+        year = int(value[0:4])
+        month = int(value[5:7])
+        day = int(value[8:10])
+        hour = int(value[11:13])
+        minute = int(value[14:16])
+        second = int(value[17:19])
+        days = days_since_unix_epoch(year, month, day)
+        return float(days * 86400 + hour * 3600 + minute * 60 + second), hour, (days + 3) % 7
+
+    parsed = parse_utc_timestamp(value)
+    return parsed.timestamp(), parsed.hour, parsed.weekday()
+
+
+def days_since_unix_epoch(year: int, month: int, day: int) -> int:
+    if month <= 2:
+        year -= 1
+        month += 12
+    era = year // 400
+    year_of_era = year - era * 400
+    day_of_year = (153 * (month - 3) + 2) // 5 + day - 1
+    day_of_era = year_of_era * 365 + year_of_era // 4 - year_of_era // 100 + day_of_year
+    return era * 146097 + day_of_era - 719468
+
+
 def vectorize_payload(
     payload: dict[str, Any],
     normalization: dict[str, float],
@@ -60,21 +86,21 @@ def vectorize_payload(
 
     amount = float(transaction["amount"])
     customer_avg = float(customer["avg_amount"])
-    requested_at = parse_utc_timestamp(transaction["requested_at"])
+    requested_seconds, requested_hour, requested_weekday = parse_utc_timestamp_metrics(transaction["requested_at"])
 
     vector = np.empty(14, dtype=np.float32)
     vector[0] = clamp(amount / normalization["max_amount"])
     vector[1] = clamp(float(transaction["installments"]) / normalization["max_installments"])
     vector[2] = clamp((amount / customer_avg) / normalization["amount_vs_avg_ratio"]) if customer_avg > 0 else 1.0
-    vector[3] = requested_at.hour / 23.0
-    vector[4] = requested_at.weekday() / 6.0
+    vector[3] = requested_hour / 23.0
+    vector[4] = requested_weekday / 6.0
 
     if last_transaction is None:
         vector[5] = -1.0
         vector[6] = -1.0
     else:
-        previous_at = parse_utc_timestamp(last_transaction["timestamp"])
-        minutes = max(0.0, (requested_at - previous_at).total_seconds() / 60.0)
+        previous_seconds = parse_utc_timestamp_metrics(last_transaction["timestamp"])[0]
+        minutes = max(0.0, (requested_seconds - previous_seconds) / 60.0)
         vector[5] = clamp(minutes / normalization["max_minutes"])
         vector[6] = clamp(float(last_transaction["km_from_current"]) / normalization["max_km"])
 

@@ -1,0 +1,7 @@
+.git
+.pytest_cache
+.uv-cache
+.venv
+__pycache__
+*.py[cod]
+resources/index

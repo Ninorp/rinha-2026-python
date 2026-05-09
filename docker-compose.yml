@@ -19,6 +19,9 @@ services:
     environment:
       ROBYN_HOST: "0.0.0.0"
       ROBYN_PORT: "8080"
+      ROBYN_LOG_LEVEL: "WARN"
+      ROBYN_PROCESSES: "2"
+      ROBYN_WORKERS: "2"
     deploy:
       resources:
         limits:
