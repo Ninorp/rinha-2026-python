@@ -50,6 +50,7 @@ def initialize() -> None:
 
     if (idx_dir / QUANTIZED_FILE).exists() and (idx_dir / LABELS_FILE).exists():
         _index = load_index(idx_dir)
+        _index.warmup()
     else:
         _index = empty_index()
 

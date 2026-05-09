@@ -1,17 +1,17 @@
 services:
-  nginx:
-    image: nginx:1.27-alpine
+  lb:
+    image: haproxy:3.0-alpine
     ports:
       - "9999:9999"
     volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
     depends_on:
       - api1
       - api2
     deploy:
       resources:
         limits:
-          cpus: "0.10"
+          cpus: "0.30"
           memory: "32MB"
 
   api1: &api
@@ -20,12 +20,13 @@ services:
       ROBYN_HOST: "0.0.0.0"
       ROBYN_PORT: "8080"
       ROBYN_LOG_LEVEL: "WARN"
-      ROBYN_PROCESSES: "2"
-      ROBYN_WORKERS: "2"
+      ROBYN_PROCESSES: "1"
+      ROBYN_WORKERS: "1"
+      RINHA_IVF_NPROBE: "14"
     deploy:
       resources:
         limits:
-          cpus: "0.45"
+          cpus: "0.35"
           memory: "159MB"
 
   api2:
