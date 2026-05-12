@@ -9,9 +9,7 @@ from rinha_api.index import (
     LABELS_FILE,
     QUANTIZED_FILE,
     VectorIndex,
-    build_index,
     empty_index,
-    index_matches_source,
     load_index,
 )
 from rinha_api.vectorize import DEFAULT_MCC_RISK, DEFAULT_NORMALIZATION, vectorize_payload
@@ -40,17 +38,8 @@ def initialize() -> None:
     _normalization = load_json_or_default(resources / "normalization.json", DEFAULT_NORMALIZATION)
     _mcc_risk = load_json_or_default(resources / "mcc_risk.json", DEFAULT_MCC_RISK)
 
-    references = resources / "references.json.gz"
-    if not references.exists():
-        references = resources / "example-references.json"
-
-    if references.exists():
-        if not index_matches_source(idx_dir, references):
-            build_index(references, idx_dir)
-
     if (idx_dir / QUANTIZED_FILE).exists() and (idx_dir / LABELS_FILE).exists():
         _index = load_index(idx_dir)
-        _index.warmup()
     else:
         _index = empty_index()
 

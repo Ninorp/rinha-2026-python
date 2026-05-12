@@ -37,11 +37,10 @@ HAProxy :9999
   +-- api2 :8080  Robyn + msgspec + NumPy
 ```
 
-Cada instancia da API carrega o indice de referencias no startup. Se o indice
-nao existir ou estiver stale em relacao ao arquivo de referencias, a aplicacao
-tenta cria-lo a partir de `resources/references.json.gz`. Na ausencia do dataset
-oficial, ela usa `resources/example-references.json`, que existe apenas para
-desenvolvimento e testes locais.
+Cada instancia da API carrega o indice de referencias no startup usando mmap,
+sem reconstruir ou aquecer todos os vetores em runtime. A imagem Docker gera o
+indice durante o build; se os arquivos de indice nao existirem, a aplicacao sobe
+com um indice vazio apenas para manter o contrato de saude.
 
 ## Fluxo da Requisicao
 

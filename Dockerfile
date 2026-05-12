@@ -24,11 +24,7 @@ ENV PYTHONPATH=/app/src \
     RINHA_RESOURCES_DIR=/app/resources \
     RINHA_INDEX_DIR=/app/resources/index
 
-RUN if [ -f /app/resources/references.json.gz ]; then \
-      python /app/scripts/build_index.py --references /app/resources/references.json.gz --out /app/resources/index; \
-    elif [ -f /app/resources/example-references.json ]; then \
-      python /app/scripts/build_index.py --references /app/resources/example-references.json --out /app/resources/index; \
-    fi
+RUN python -c "from pathlib import Path; from rinha_api.index import build_index, index_matches_source; references = Path('/app/resources/references.json.gz'); references = references if references.exists() else Path('/app/resources/example-references.json'); index = Path('/app/resources/index'); build_index(references, index) if references.exists() and not index_matches_source(index, references) else None"
 
 EXPOSE 8080
 
