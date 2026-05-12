@@ -1,0 +1,37 @@
+services:
+  lb:
+    image: haproxy:3.0-alpine
+    ports:
+      - "9999:9999"
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    depends_on:
+      - api1
+      - api2
+    deploy:
+      resources:
+        limits:
+          cpus: "0.30"
+          memory: "32MB"
+
+  api1: &api
+    image: rodolfoc2s/rinha-2026-python:latest
+    environment:
+      ROBYN_HOST: "0.0.0.0"
+      ROBYN_PORT: "8080"
+      ROBYN_LOG_LEVEL: "WARN"
+      ROBYN_PROCESSES: "1"
+      ROBYN_WORKERS: "1"
+      RINHA_IVF_NPROBE: "14"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.35"
+          memory: "159MB"
+
+  api2:
+    <<: *api
+
+networks:
+  default:
+    driver: bridge
