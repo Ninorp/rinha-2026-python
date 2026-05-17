@@ -10,6 +10,7 @@ from rinha_api.index import (
     QUANTIZED_FILE,
     VectorIndex,
     empty_index,
+    env_flag,
     load_index,
 )
 from rinha_api.vectorize import DEFAULT_MCC_RISK, DEFAULT_NORMALIZATION, vectorize_payload
@@ -42,6 +43,8 @@ def initialize() -> None:
         _index = load_index(idx_dir)
     else:
         _index = empty_index()
+    if env_flag("RINHA_INDEX_WARMUP"):
+        _index.warmup()
 
     _ready = True
 

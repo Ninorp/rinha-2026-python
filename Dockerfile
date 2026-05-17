@@ -24,6 +24,24 @@ ENV PYTHONPATH=/app/src \
     RINHA_RESOURCES_DIR=/app/resources \
     RINHA_INDEX_DIR=/app/resources/index
 
+ARG RINHA_IVF_CELLS=8192
+ARG RINHA_IVF_SAMPLE=250000
+ARG RINHA_IVF_ITERATIONS=6
+ARG RINHA_TREE_SAMPLE=2000000
+ARG RINHA_TREE_DEPTH=14
+ARG RINHA_TREE_QUANTILES=511
+ARG RINHA_TREE_MIN_LEAF=50
+ARG RINHA_TREE_CONFIDENCE=0.90
+
+ENV RINHA_IVF_CELLS=${RINHA_IVF_CELLS} \
+    RINHA_IVF_SAMPLE=${RINHA_IVF_SAMPLE} \
+    RINHA_IVF_ITERATIONS=${RINHA_IVF_ITERATIONS} \
+    RINHA_TREE_SAMPLE=${RINHA_TREE_SAMPLE} \
+    RINHA_TREE_DEPTH=${RINHA_TREE_DEPTH} \
+    RINHA_TREE_QUANTILES=${RINHA_TREE_QUANTILES} \
+    RINHA_TREE_MIN_LEAF=${RINHA_TREE_MIN_LEAF} \
+    RINHA_TREE_CONFIDENCE=${RINHA_TREE_CONFIDENCE}
+
 RUN python -c "from pathlib import Path; from rinha_api.index import build_index, index_matches_source; references = Path('/app/resources/references.json.gz'); references = references if references.exists() else Path('/app/resources/example-references.json'); index = Path('/app/resources/index'); build_index(references, index) if references.exists() and not index_matches_source(index, references) else None"
 
 EXPOSE 8080

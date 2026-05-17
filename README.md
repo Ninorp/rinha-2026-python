@@ -37,10 +37,12 @@ HAProxy :9999
   +-- api2 :8080  Robyn + msgspec + NumPy
 ```
 
-Cada instancia da API carrega o indice de referencias no startup usando mmap,
-sem reconstruir ou aquecer todos os vetores em runtime. A imagem Docker gera o
-indice durante o build; se os arquivos de indice nao existirem, a aplicacao sobe
-com um indice vazio apenas para manter o contrato de saude.
+Cada instancia da API carrega o indice de referencias no startup. No compose de
+benchmark, os arrays principais sao pre-carregados em RAM para evitar cauda de
+page fault; em desenvolvimento, isso pode ser desligado com
+`RINHA_INDEX_PRELOAD=0`. A imagem Docker gera o indice durante o build; se os
+arquivos de indice nao existirem, a aplicacao sobe com um indice vazio apenas
+para manter o contrato de saude.
 
 ## Fluxo da Requisicao
 
@@ -178,19 +180,41 @@ resources/index/index.json
 
 ## Resultado de Referencia
 
-Com o dataset oficial local e `RINHA_IVF_NPROBE=14`, a rodada de carga mais
-recente ficou em:
+O pacote atual esta no estagio de tuning ANN/IVF com indice pre-carregado,
+arvore confiante e normas de vetores/centroides pre-computadas. A configuracao
+local de benchmark esta em:
 
 ```text
-p99: 2.14ms
-false_positive_detections: 7
-false_negative_detections: 7
-weighted_errors_E: 28
-final_score: 5230.53
+RINHA_IVF_CELLS=8192
+RINHA_IVF_NPROBE=10
+RINHA_IVF_SAMPLE=250000
+RINHA_IVF_ITERATIONS=6
+RINHA_TREE_SAMPLE=2000000
+RINHA_TREE_DEPTH=14
+RINHA_TREE_QUANTILES=511
+RINHA_TREE_MIN_LEAF=50
+RINHA_TREE_CONFIDENCE=0.90
+RINHA_INDEX_PRELOAD=1
+RINHA_INDEX_WARMUP=0
 ```
 
-Esse ponto troca um pouco de p99 por uma queda grande na penalidade de
-deteccao. O threshold de aprovacao permanece fixo em `fraud_score < 0.6`.
+Melhor rodada local reportada durante o tuning:
+
+```text
+p99: 1.60ms
+false_positive_detections: 4
+false_negative_detections: 4
+weighted_errors_E: 16
+final_score: 5426.72
+```
+
+Esse numero veio do script local de validacao usado no tuning e deve ser
+revalidado contra a rodada oficial completa antes de publicar nova imagem. O
+resultado publico anterior da previa ainda media uma imagem antiga, com p99 em
+torno de 10ms; para a previa refletir este pacote, a imagem
+`rodolfoc2s/rinha-2026-python:latest` precisa ser reconstruida e enviada.
+
+O threshold de aprovacao permanece fixo em `fraud_score < 0.6`.
 
 ## Testes
 
@@ -224,14 +248,18 @@ docker compose config
 | --- | --- | --- |
 | `RINHA_RESOURCES_DIR` | `resources` | Diretorio com configs e dataset |
 | `RINHA_INDEX_DIR` | `resources/index` | Diretorio dos arquivos de indice |
-| `RINHA_IVF_CELLS` | `4096` | Numero de centroides/celulas gerados no build |
-| `RINHA_IVF_NPROBE` | `1` (`14` no compose) | Numero de celulas consultadas por request quando ha fallback para rerank |
-| `RINHA_IVF_SAMPLE` | `50000` | Amostra usada para treinar os centroides |
-| `RINHA_IVF_ITERATIONS` | `4` | Iteracoes de k-means sobre a amostra |
+| `RINHA_IVF_CELLS` | `4096` (`8192` no Dockerfile/compose) | Numero de centroides/celulas gerados no build |
+| `RINHA_IVF_NPROBE` | `1` (`10` no compose) | Numero de celulas consultadas por request quando ha fallback para rerank |
+| `RINHA_IVF_SAMPLE` | `50000` (`250000` no Dockerfile/compose) | Amostra usada para treinar os centroides |
+| `RINHA_IVF_ITERATIONS` | `4` (`6` no Dockerfile/compose) | Iteracoes de k-means sobre a amostra |
+| `RINHA_INDEX_PRELOAD` | `0` (`1` no compose) | Carrega arrays do indice em RAM em vez de usar mmap |
+| `RINHA_INDEX_WARMUP` | `0` | Faz uma varredura completa do indice no startup antes de `/ready` |
 | `RINHA_CELL_FAST_MARGIN` | `1.0` | Atalho antigo por maioria da celula; `1.0` deixa desativado |
-| `RINHA_TREE_CONFIDENCE` | `0.95` | Confianca minima para a arvore responder sem fallback IVF |
-| `RINHA_TREE_SAMPLE` | `500000` | Amostra usada para treinar a arvore confiante no build |
-| `RINHA_TREE_DEPTH` | `10` | Profundidade maxima da arvore confiante |
+| `RINHA_TREE_CONFIDENCE` | `0.95` (`0.90` no compose) | Confianca minima para a arvore responder sem fallback IVF |
+| `RINHA_TREE_SAMPLE` | `500000` (`2000000` no Dockerfile/compose) | Amostra usada para treinar a arvore confiante no build |
+| `RINHA_TREE_DEPTH` | `10` (`14` no Dockerfile/compose) | Profundidade maxima da arvore confiante |
+| `RINHA_TREE_QUANTILES` | `199` (`511` no Dockerfile/compose) | Quantis candidatos por feature no treino da arvore |
+| `RINHA_TREE_MIN_LEAF` | `50` | Tamanho minimo de folha no treino da arvore |
 | `ROBYN_HOST` | definido no compose | Host do servidor Robyn |
 | `ROBYN_PORT` | definido no compose | Porta do servidor Robyn |
 | `ROBYN_LOG_LEVEL` | `WARN` | Reduz logs no benchmark |
@@ -241,13 +269,20 @@ docker compose config
 ## Pontos de Evolucao
 
 O principal gargalo era a busca vetorial exata sobre o dataset completo. A
-implementacao atual ja aplica o caminho ANN/IVF; os proximos passos naturais
-sao medir qualidade e ajustar o compromisso entre recall e latencia:
+implementacao atual aplica ANN/IVF, pre-carregamento opcional e distancia
+otimizada por normas pre-computadas. O p99 local ja caiu para a faixa de
+1-2ms, mas ainda ha uma cauda de fallback IVF em torno de alguns pontos
+percentuais.
 
-- medir recall versus latencia usando o dataset oficial;
-- ajustar `RINHA_IVF_CELLS` e `RINHA_IVF_NPROBE`;
-- testar centroides maiores/menores conforme o limite de memoria;
-- comparar o score final contra o load test completo.
+Proximos passos naturais:
+
+- rodar a bateria oficial completa com `submission.docker-compose.yml`;
+- publicar a imagem atualizada e comparar com a previa publica;
+- varrer `RINHA_IVF_NPROBE=10/12/14` para achar o melhor compromisso p99/E;
+- investigar um classificador O(1) melhor para os casos de borda que ainda
+  caem no IVF;
+- reduzir tempo de build do indice, que hoje ainda fica na ordem de minutos
+  com `TREE_SAMPLE=2000000`.
 
 Arquivos mais importantes para essa evolucao:
 

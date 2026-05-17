@@ -71,7 +71,7 @@ def test_confident_tree_score_short_circuits_index() -> None:
     assert index.score(np.array([0.9] * 14, dtype=np.float32)) == 1.0
 
 
-def test_index_matches_source_uses_metadata(tmp_path) -> None:
+def test_index_matches_source_uses_metadata(tmp_path, monkeypatch) -> None:
     references = tmp_path / "references.json"
     references.write_text("[]", encoding="utf-8")
     index_dir = tmp_path / "index"
@@ -82,12 +82,18 @@ def test_index_matches_source_uses_metadata(tmp_path) -> None:
     stat = references.stat()
     (index_dir / META_FILE).write_text(
         json.dumps(
-            {
-                "algorithm": "ivf-flat-f16",
-                "cells": 4096,
-                "dimensions": 14,
-                "source_name": references.name,
-                "source_size": stat.st_size,
+                {
+                    "algorithm": "ivf-flat-f16",
+                    "cells": 4096,
+                    "ivf_sample": 50000,
+                    "ivf_iterations": 4,
+                    "tree_sample": 500000,
+                    "tree_depth": 10,
+                    "tree_quantiles": 199,
+                    "tree_min_leaf": 50,
+                    "dimensions": 14,
+                    "source_name": references.name,
+                    "source_size": stat.st_size,
                 "source_mtime_ns": stat.st_mtime_ns,
             }
         ),
@@ -95,6 +101,12 @@ def test_index_matches_source_uses_metadata(tmp_path) -> None:
     )
 
     assert index_matches_source(index_dir, references)
+
+    monkeypatch.setenv("RINHA_TREE_DEPTH", "12")
+
+    assert not index_matches_source(index_dir, references)
+
+    monkeypatch.setenv("RINHA_TREE_DEPTH", "10")
 
     references.write_text("[1]", encoding="utf-8")
 

@@ -22,6 +22,11 @@ DEFAULT_CELLS = 4096
 DEFAULT_NPROBE = 1
 DEFAULT_FAST_MARGIN = 1.0
 DEFAULT_TREE_CONFIDENCE = 0.95
+TRUTHY = {"1", "true", "yes", "on"}
+
+
+def env_flag(name: str, default: str = "0") -> bool:
+    return os.getenv(name, default).lower() in TRUTHY
 
 
 class VectorIndex:
@@ -51,6 +56,7 @@ class VectorIndex:
         self.vectors = vectors.astype(np.uint8 if vectors.dtype == np.uint8 else np.float16, copy=False)
         self.labels = labels.astype(np.uint8, copy=False)
         self.centroids = centroids.astype(np.float32, copy=False) if centroids is not None else None
+        self.centroid_norms = np.sum(self.centroids * self.centroids, axis=1) if self.centroids is not None else None
         self.offsets = offsets.astype(np.int64, copy=False) if offsets is not None else None
         self.tree = tree
         self.block_size = block_size
@@ -58,6 +64,7 @@ class VectorIndex:
         self.fast_margin = float(os.getenv("RINHA_CELL_FAST_MARGIN", str(DEFAULT_FAST_MARGIN)))
         self.tree_confidence = float(os.getenv("RINHA_TREE_CONFIDENCE", str(DEFAULT_TREE_CONFIDENCE)))
         self.cell_scores = self._build_cell_scores()
+        self.vector_norms = self._build_vector_norms()
 
     def score(self, query: np.ndarray) -> float:
         if self.labels.shape[0] == 0:
@@ -105,9 +112,12 @@ class VectorIndex:
     def _score_ivf(self, query: np.ndarray) -> float:
         assert self.centroids is not None
         assert self.offsets is not None
+        assert self.centroid_norms is not None
 
         probes = min(self.nprobe, self.centroids.shape[0])
-        center_distances = np.sum((self.centroids - query.astype(np.float32, copy=False)) ** 2, axis=1)
+        query_f32 = query.astype(np.float32, copy=False)
+        query_norm = float(np.sum(query_f32 * query_f32))
+        center_distances = self.centroid_norms + query_norm - 2.0 * (self.centroids @ query_f32)
         if self.cell_scores is not None:
             nearest = int(np.argmin(center_distances))
             cell_score = float(self.cell_scores[nearest])
@@ -118,46 +128,39 @@ class VectorIndex:
         quantized = quantize_vector(query).astype(np.int16, copy=False) if use_quantized else None
 
         neighbors = min(5, self.labels.shape[0])
-        best_distances = np.full(
-            neighbors,
-            np.iinfo(np.int32).max if use_quantized else np.inf,
-            dtype=np.int32 if use_quantized else np.float32,
-        )
-        best_labels = np.zeros(neighbors, dtype=np.uint8)
-        found = 0
-
+        total = 0
         for cell in cells:
-            cell_start = int(self.offsets[cell])
-            cell_end = int(self.offsets[cell + 1])
-            if cell_start == cell_end:
-                continue
+            total += int(self.offsets[cell + 1] - self.offsets[cell])
 
-            for start in range(cell_start, cell_end, self.block_size):
-                end = min(start + self.block_size, cell_end)
-                block = self.vectors[start:end]
-                if use_quantized:
-                    block = block.astype(np.int16, copy=False)
-                    diff = block - quantized
-                    distances = np.sum(diff.astype(np.int32, copy=False) * diff.astype(np.int32, copy=False), axis=1)
-                else:
-                    diff = block.astype(np.float32, copy=False) - query.astype(np.float32, copy=False)
-                    distances = np.sum(diff * diff, axis=1)
-                take = min(neighbors, distances.shape[0])
-                local = np.argpartition(distances, take - 1)[:take]
-
-                merged_distances = np.concatenate((best_distances, distances[local]))
-                merged_labels = np.concatenate((best_labels, self.labels[start:end][local]))
-                keep = np.argpartition(merged_distances, neighbors - 1)[:neighbors]
-                best_distances = merged_distances[keep]
-                best_labels = merged_labels[keep]
-                found += take
-
-        if found == 0:
+        if total == 0:
             return self._score_exact(query)
 
-        usable = min(neighbors, found)
-        best = np.argpartition(best_distances, usable - 1)[:usable]
-        frauds = int(np.sum(best_labels[best]))
+        candidate_ids = np.empty(total, dtype=np.int64)
+        position = 0
+        for cell in cells:
+            start = int(self.offsets[cell])
+            end = int(self.offsets[cell + 1])
+            size = end - start
+            if size:
+                candidate_ids[position : position + size] = np.arange(start, end, dtype=np.int64)
+                position += size
+        candidate_ids = candidate_ids[:position]
+
+        block = self.vectors[candidate_ids]
+        if use_quantized:
+            block = block.astype(np.int16, copy=False)
+            diff = block - quantized
+            distances = np.sum(diff.astype(np.int32, copy=False) * diff.astype(np.int32, copy=False), axis=1)
+        elif self.vector_norms is not None:
+            block = block.astype(np.float32, copy=False)
+            distances = self.vector_norms[candidate_ids] + query_norm - 2.0 * (block @ query_f32)
+        else:
+            diff = block.astype(np.float32, copy=False) - query_f32
+            distances = np.sum(diff * diff, axis=1)
+
+        usable = min(neighbors, distances.shape[0])
+        best = np.argpartition(distances, usable - 1)[:usable]
+        frauds = int(np.sum(self.labels[candidate_ids[best]]))
         return frauds / float(usable)
 
     def _build_cell_scores(self) -> np.ndarray | None:
@@ -171,6 +174,17 @@ class VectorIndex:
             if start != end:
                 scores[cell] = float(np.mean(self.labels[start:end]))
         return scores
+
+    def _build_vector_norms(self) -> np.ndarray | None:
+        if self.vectors.dtype == np.uint8:
+            return None
+
+        norms = np.empty(self.vectors.shape[0], dtype=np.float32)
+        for start in range(0, self.vectors.shape[0], self.block_size):
+            end = min(start + self.block_size, self.vectors.shape[0])
+            block = self.vectors[start:end].astype(np.float32, copy=False)
+            norms[start:end] = np.sum(block * block, axis=1)
+        return norms
 
     def _score_tree(self, query: np.ndarray) -> float | None:
         if self.tree is None:
@@ -210,19 +224,20 @@ class VectorIndex:
 
 
 def load_index(index_dir: Path) -> VectorIndex:
+    mmap_mode = None if env_flag("RINHA_INDEX_PRELOAD") else "r"
     half_path = index_dir / HALF_FILE
     if half_path.exists():
-        vectors = np.load(half_path, mmap_mode="r")
+        vectors = np.load(half_path, mmap_mode=mmap_mode)
     elif (index_dir / QUANTIZED_FILE).exists():
-        vectors = np.load(index_dir / QUANTIZED_FILE, mmap_mode="r")
+        vectors = np.load(index_dir / QUANTIZED_FILE, mmap_mode=mmap_mode)
     else:
-        vectors = quantize_vectors(np.load(index_dir / VECTORS_FILE, mmap_mode="r"))
-    labels = np.load(index_dir / LABELS_FILE, mmap_mode="r")
+        vectors = quantize_vectors(np.load(index_dir / VECTORS_FILE, mmap_mode=mmap_mode))
+    labels = np.load(index_dir / LABELS_FILE, mmap_mode=mmap_mode)
     centroids = None
     offsets = None
     if (index_dir / CENTROIDS_FILE).exists() and (index_dir / OFFSETS_FILE).exists():
-        centroids = np.load(index_dir / CENTROIDS_FILE, mmap_mode="r")
-        offsets = np.load(index_dir / OFFSETS_FILE, mmap_mode="r")
+        centroids = np.load(index_dir / CENTROIDS_FILE, mmap_mode=mmap_mode)
+        offsets = np.load(index_dir / OFFSETS_FILE, mmap_mode=mmap_mode)
     tree = None
     if (index_dir / TREE_FILE).exists():
         tree_file = np.load(index_dir / TREE_FILE)
@@ -272,6 +287,12 @@ def build_index(references_path: Path, index_dir: Path, cells: int | None = None
         "dimensions": 14,
         "count": len(records),
         "cells": cell_count,
+        "ivf_sample": int(os.getenv("RINHA_IVF_SAMPLE", "50000")),
+        "ivf_iterations": int(os.getenv("RINHA_IVF_ITERATIONS", "4")),
+        "tree_sample": int(os.getenv("RINHA_TREE_SAMPLE", "500000")),
+        "tree_depth": int(os.getenv("RINHA_TREE_DEPTH", "10")),
+        "tree_quantiles": int(os.getenv("RINHA_TREE_QUANTILES", "199")),
+        "tree_min_leaf": int(os.getenv("RINHA_TREE_MIN_LEAF", "50")),
         "source_name": references_path.name,
         "source_size": stat.st_size,
         "source_mtime_ns": stat.st_mtime_ns,
@@ -428,6 +449,12 @@ def index_matches_source(index_dir: Path, references_path: Path) -> bool:
     return (
         meta.get("algorithm") == "ivf-flat-f16"
         and meta.get("cells") == int(os.getenv("RINHA_IVF_CELLS", str(DEFAULT_CELLS)))
+        and meta.get("ivf_sample") == int(os.getenv("RINHA_IVF_SAMPLE", "50000"))
+        and meta.get("ivf_iterations") == int(os.getenv("RINHA_IVF_ITERATIONS", "4"))
+        and meta.get("tree_sample") == int(os.getenv("RINHA_TREE_SAMPLE", "500000"))
+        and meta.get("tree_depth") == int(os.getenv("RINHA_TREE_DEPTH", "10"))
+        and meta.get("tree_quantiles") == int(os.getenv("RINHA_TREE_QUANTILES", "199"))
+        and meta.get("tree_min_leaf") == int(os.getenv("RINHA_TREE_MIN_LEAF", "50"))
         and meta.get("dimensions") == 14
         and meta.get("source_name") == references_path.name
         and meta.get("source_size") == stat.st_size

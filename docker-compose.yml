@@ -15,14 +15,35 @@ services:
           memory: "32MB"
 
   api1: &api
-    build: .
+    image: rinha-2026-python-local
+    build:
+      context: .
+      args:
+        RINHA_IVF_CELLS: "8192"
+        RINHA_IVF_SAMPLE: "250000"
+        RINHA_IVF_ITERATIONS: "6"
+        RINHA_TREE_SAMPLE: "2000000"
+        RINHA_TREE_DEPTH: "14"
+        RINHA_TREE_QUANTILES: "511"
+        RINHA_TREE_MIN_LEAF: "50"
+        RINHA_TREE_CONFIDENCE: "0.90"
     environment:
       ROBYN_HOST: "0.0.0.0"
       ROBYN_PORT: "8080"
       ROBYN_LOG_LEVEL: "WARN"
       ROBYN_PROCESSES: "1"
       ROBYN_WORKERS: "1"
-      RINHA_IVF_NPROBE: "14"
+      RINHA_IVF_NPROBE: "10"
+      RINHA_IVF_CELLS: "8192"
+      RINHA_IVF_SAMPLE: "250000"
+      RINHA_IVF_ITERATIONS: "6"
+      RINHA_TREE_SAMPLE: "2000000"
+      RINHA_TREE_DEPTH: "14"
+      RINHA_TREE_QUANTILES: "511"
+      RINHA_TREE_MIN_LEAF: "50"
+      RINHA_INDEX_PRELOAD: "1"
+      RINHA_INDEX_WARMUP: "0"
+      RINHA_TREE_CONFIDENCE: "0.90"
     deploy:
       resources:
         limits:
