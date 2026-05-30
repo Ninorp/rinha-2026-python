@@ -5,6 +5,7 @@ import numpy as np
 from rinha_api.index import (
     CENTROIDS_FILE,
     HALF_FILE,
+    INDEX_ALGORITHM,
     LABELS_FILE,
     META_FILE,
     OFFSETS_FILE,
@@ -12,6 +13,7 @@ from rinha_api.index import (
     TREE_FILE,
     VectorIndex,
     index_matches_source,
+    load_index,
     quantize_vectors,
 )
 
@@ -56,6 +58,21 @@ def test_pure_cell_score_uses_cell_majority_fast_path() -> None:
     assert index.score(np.array([0.01] * 14, dtype=np.float32)) == 0.0
 
 
+def test_load_index_prefers_quantized_vectors_and_keeps_half_precision_for_rerank(tmp_path) -> None:
+    index_dir = tmp_path / "index"
+    index_dir.mkdir()
+    vectors_f32 = np.array([[0.0] * 14, [1.0] * 14], dtype=np.float32)
+    np.save(index_dir / QUANTIZED_FILE, quantize_vectors(vectors_f32))
+    np.save(index_dir / HALF_FILE, vectors_f32.astype(np.float16))
+    np.save(index_dir / LABELS_FILE, np.array([0, 1], dtype=np.uint8))
+
+    index = load_index(index_dir)
+
+    assert index.vectors.dtype == np.uint8
+    assert index.rerank_vectors is not None
+    assert index.rerank_vectors.dtype == np.float16
+
+
 def test_confident_tree_score_short_circuits_index() -> None:
     vectors = quantize_vectors(np.array([[0.0] * 14, [1.0] * 14], dtype=np.float32))
     labels = np.array([0, 1], dtype=np.uint8)
@@ -76,14 +93,14 @@ def test_index_matches_source_uses_metadata(tmp_path, monkeypatch) -> None:
     references.write_text("[]", encoding="utf-8")
     index_dir = tmp_path / "index"
     index_dir.mkdir()
-    for filename in [HALF_FILE, LABELS_FILE, CENTROIDS_FILE, OFFSETS_FILE, TREE_FILE]:
+    for filename in [QUANTIZED_FILE, HALF_FILE, LABELS_FILE, CENTROIDS_FILE, OFFSETS_FILE, TREE_FILE]:
         (index_dir / filename).write_bytes(b"placeholder")
 
     stat = references.stat()
     (index_dir / META_FILE).write_text(
         json.dumps(
                 {
-                    "algorithm": "ivf-flat-f16",
+                    "algorithm": INDEX_ALGORITHM,
                     "cells": 4096,
                     "ivf_sample": 50000,
                     "ivf_iterations": 4,
