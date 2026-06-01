@@ -16,9 +16,10 @@ QUANTIZED_FILE = "vectors.u1.npy"
 LABELS_FILE = "labels.u1.npy"
 CENTROIDS_FILE = "centroids.f32.npy"
 OFFSETS_FILE = "offsets.i8.npy"
+BOUNDS_FILE = "bounds.u1.npy"
 TREE_FILE = "tree.npz"
 META_FILE = "index.json"
-INDEX_ALGORITHM = "ivf-flat-q8-rerank-f16"
+INDEX_ALGORITHM = "ivf-flat-q8-rerank-f16-cell-prune"
 DEFAULT_CELLS = 4096
 DEFAULT_NPROBE = 1
 DEFAULT_FAST_MARGIN = 1.0
@@ -38,6 +39,7 @@ class VectorIndex:
         labels: np.ndarray,
         centroids: np.ndarray | None = None,
         offsets: np.ndarray | None = None,
+        bounds: np.ndarray | None = None,
         tree: dict[str, np.ndarray] | None = None,
         rerank_vectors: np.ndarray | None = None,
         block_size: int = 65536,
@@ -56,6 +58,11 @@ class VectorIndex:
                 raise ValueError("offsets must have one more entry than centroids")
             if int(offsets[0]) != 0 or int(offsets[-1]) != labels.shape[0]:
                 raise ValueError("offsets must span all vectors")
+        if bounds is not None:
+            if centroids is None:
+                raise ValueError("bounds require centroids")
+            if bounds.shape != (centroids.shape[0], 2, vectors.shape[1]):
+                raise ValueError("bounds must have min and max vectors per centroid")
         if rerank_vectors is not None and rerank_vectors.shape != vectors.shape:
             raise ValueError("rerank vectors must have same shape as vectors")
         self.vectors = vectors.astype(np.uint8 if vectors.dtype == np.uint8 else np.float16, copy=False)
@@ -66,12 +73,15 @@ class VectorIndex:
         self.centroids = centroids.astype(np.float32, copy=False) if centroids is not None else None
         self.centroid_norms = np.sum(self.centroids * self.centroids, axis=1) if self.centroids is not None else None
         self.offsets = offsets.astype(np.int64, copy=False) if offsets is not None else None
+        self.bounds = bounds.astype(np.int16, copy=False) if bounds is not None else None
         self.tree = tree
         self.block_size = block_size
         self.nprobe = max(1, nprobe)
         self.fast_margin = float(os.getenv("RINHA_CELL_FAST_MARGIN", str(DEFAULT_FAST_MARGIN)))
         self.rerank_k = max(5, int(os.getenv("RINHA_RERANK_K", str(DEFAULT_RERANK_K))))
         self.tree_confidence = float(os.getenv("RINHA_TREE_CONFIDENCE", str(DEFAULT_TREE_CONFIDENCE)))
+        self.cell_prune = env_flag("RINHA_IVF_CELL_PRUNE")
+        self.probe_counts: list[int] | None = None
         self.cell_scores = self._build_cell_scores()
         self.vector_norms = self._build_vector_norms()
 
@@ -139,13 +149,26 @@ class VectorIndex:
         cells = np.argpartition(center_distances, probes - 1)[:probes]
         use_quantized = self.vectors.dtype == np.uint8
         quantized = quantize_vector(query).astype(np.int16, copy=False) if use_quantized else None
+        lower_bounds = self._cell_lower_bounds(cells, quantized) if use_quantized else None
+        if lower_bounds is not None:
+            order = np.argsort(lower_bounds, kind="stable")
+            cells = cells[order]
+            lower_bounds = lower_bounds[order]
 
         neighbors = min(5, self.labels.shape[0])
         candidate_k = self._candidate_k(neighbors)
         best_ids = np.array([], dtype=np.int64)
         best_distances = np.array([], dtype=np.int32 if use_quantized else np.float32)
 
-        for cell in cells:
+        visited = 0
+        for position, cell in enumerate(cells):
+            if (
+                lower_bounds is not None
+                and best_ids.size >= candidate_k
+                and int(lower_bounds[position]) > int(np.max(best_distances))
+            ):
+                break
+            visited += 1
             start = int(self.offsets[cell])
             end = int(self.offsets[cell + 1])
             if end <= start:
@@ -174,12 +197,27 @@ class VectorIndex:
                 candidate_k,
             )
 
+        if self.probe_counts is not None:
+            self.probe_counts.append(visited)
         if best_ids.size == 0:
             return self._score_exact(query)
 
         best_ids = self._rerank_top_k(query_f32, best_ids, neighbors)
         frauds = int(np.sum(self.labels[best_ids]))
         return frauds / float(best_ids.shape[0])
+
+    def _cell_lower_bounds(self, cells: np.ndarray, quantized: np.ndarray | None) -> np.ndarray | None:
+        if (
+            not self.cell_prune
+            or quantized is None
+            or self.bounds is None
+        ):
+            return None
+
+        mins = self.bounds[cells, 0]
+        maxs = self.bounds[cells, 1]
+        diff = np.maximum(np.maximum(mins - quantized, quantized - maxs), 0).astype(np.int32, copy=False)
+        return np.sum(diff * diff, axis=1, dtype=np.int32)
 
     @staticmethod
     def _merge_top_k(
@@ -267,6 +305,8 @@ class VectorIndex:
             _ = float(np.sum(self.centroids, dtype=np.float64))
         if self.offsets is not None:
             _ = int(np.sum(self.offsets, dtype=np.int64))
+        if self.bounds is not None:
+            _ = int(np.sum(self.bounds, dtype=np.uint64))
         if self.labels.shape[0] > 0:
             _ = int(np.sum(self.labels, dtype=np.uint64))
         if self.vectors.shape[0] > 0:
@@ -297,9 +337,12 @@ def load_index(index_dir: Path) -> VectorIndex:
     labels = np.load(index_dir / LABELS_FILE, mmap_mode=mmap_mode)
     centroids = None
     offsets = None
+    bounds = None
     if (index_dir / CENTROIDS_FILE).exists() and (index_dir / OFFSETS_FILE).exists():
         centroids = np.load(index_dir / CENTROIDS_FILE, mmap_mode=mmap_mode)
         offsets = np.load(index_dir / OFFSETS_FILE, mmap_mode=mmap_mode)
+        if (index_dir / BOUNDS_FILE).exists():
+            bounds = np.load(index_dir / BOUNDS_FILE, mmap_mode=mmap_mode)
     tree = None
     if (index_dir / TREE_FILE).exists():
         tree_file = np.load(index_dir / TREE_FILE)
@@ -310,6 +353,7 @@ def load_index(index_dir: Path) -> VectorIndex:
         labels,
         centroids=centroids,
         offsets=offsets,
+        bounds=bounds,
         tree=tree,
         rerank_vectors=rerank_vectors,
         nprobe=nprobe,
@@ -342,12 +386,14 @@ def build_index(references_path: Path, index_dir: Path, cells: int | None = None
     offsets[0] = 0
     np.cumsum(counts, out=offsets[1:])
     order = np.argsort(assignments, kind="stable")
+    ordered_quantized = quantized[order]
 
-    np.save(index_dir / QUANTIZED_FILE, quantized[order])
+    np.save(index_dir / QUANTIZED_FILE, ordered_quantized)
     np.save(index_dir / HALF_FILE, vectors[order].astype(np.float16, copy=False))
     np.save(index_dir / LABELS_FILE, labels[order])
     np.save(index_dir / CENTROIDS_FILE, centroids)
     np.save(index_dir / OFFSETS_FILE, offsets)
+    np.save(index_dir / BOUNDS_FILE, build_quantized_cell_bounds(ordered_quantized, centroids, offsets))
     tree = train_confident_tree(vectors, labels)
     np.savez_compressed(index_dir / TREE_FILE, **tree)
 
@@ -382,6 +428,24 @@ def quantize_vectors(vectors: np.ndarray) -> np.ndarray:
 def quantize_vector(vector: np.ndarray) -> np.ndarray:
     clipped = np.clip(vector, -1.0, 1.0)
     return np.rint((clipped + 1.0) * 127.5).astype(np.uint8)
+
+
+def build_quantized_cell_bounds(
+    vectors: np.ndarray,
+    centroids: np.ndarray,
+    offsets: np.ndarray,
+) -> np.ndarray:
+    bounds = np.empty((centroids.shape[0], 2, vectors.shape[1]), dtype=np.uint8)
+    for cell in range(centroids.shape[0]):
+        start = int(offsets[cell])
+        end = int(offsets[cell + 1])
+        if end <= start:
+            bounds[cell, 0] = 0
+            bounds[cell, 1] = 255
+            continue
+        bounds[cell, 0] = np.min(vectors[start:end], axis=0)
+        bounds[cell, 1] = np.max(vectors[start:end], axis=0)
+    return bounds
 
 
 def train_centroids(vectors: np.ndarray, cells: int) -> np.ndarray:
@@ -506,7 +570,16 @@ def train_confident_tree(vectors: np.ndarray, labels: np.ndarray) -> dict[str, n
 
 
 def index_matches_source(index_dir: Path, references_path: Path) -> bool:
-    required = [QUANTIZED_FILE, HALF_FILE, LABELS_FILE, CENTROIDS_FILE, OFFSETS_FILE, TREE_FILE, META_FILE]
+    required = [
+        QUANTIZED_FILE,
+        HALF_FILE,
+        LABELS_FILE,
+        CENTROIDS_FILE,
+        OFFSETS_FILE,
+        BOUNDS_FILE,
+        TREE_FILE,
+        META_FILE,
+    ]
     if any(not (index_dir / filename).exists() for filename in required):
         return False
 

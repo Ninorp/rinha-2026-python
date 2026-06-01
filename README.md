@@ -8,7 +8,9 @@ O projeto esta estruturado para manter o Python como camada de orquestracao da
 API e deixar o trabalho pesado concentrado em arrays compactos. A busca usa um
 indice IVF-flat: os vetores sao agrupados por centroides no build e, em runtime,
 a API consulta um conjunto pequeno de celulas proximas em `uint8` antes de fazer
-rerank dos candidatos com vetores `float16`.
+rerank dos candidatos com vetores `float16`. Cada celula tambem guarda limites
+`min/max` quantizados por dimensao, usados para encerrar a busca quando as
+celulas restantes comprovadamente nao podem entrar no top-k.
 
 ## Caracteristicas
 
@@ -18,6 +20,7 @@ rerank dos candidatos com vetores `float16`.
 - Indice de referencias pre-processado em arquivos NumPy.
 - Vetores compactos `uint8` para a primeira passada, com rerank em `float16`.
 - Busca ANN/IVF com `nprobe` ajustado para equilibrar recall e latencia.
+- Poda exata por caixa quantizada para evitar varreduras IVF desnecessarias.
 - `docker-compose.yml` com HAProxy em modo TCP + duas instancias da API.
 - Dependencias e lockfile gerenciados por `uv`.
 - Testes unitarios e de handlers da API com `pytest`.
@@ -96,6 +99,7 @@ fraud_score >= 0.6 => approved = false
 |   +-- normalization.json        # parametros de normalizacao
 +-- scripts/
 |   +-- build_index.py            # gera arquivos de indice em resources/index
+|   +-- compare_cell_prune.py     # prova equivalencia e mede celulas IVF visitadas
 |   +-- evaluate_quality.py       # mede FP/FN/E localmente contra test-data.json
 +-- src/rinha_api/
 |   +-- app.py                    # rotas Robyn e inicializacao da aplicacao
@@ -175,6 +179,7 @@ resources/index/vectors.f16.npy
 resources/index/labels.u1.npy
 resources/index/centroids.f32.npy
 resources/index/offsets.i8.npy
+resources/index/bounds.u1.npy
 resources/index/tree.npz
 resources/index/index.json
 ```
@@ -202,12 +207,13 @@ RINHA_CELL_FAST_MARGIN=0.50
 RINHA_INDEX_PRELOAD=1
 RINHA_RERANK_PRELOAD=0
 RINHA_INDEX_WARMUP=1
+RINHA_IVF_CELL_PRUNE=1
 ```
 
 Imagem de submissao atual:
 
 ```text
-rodolfoc2s/rinha-2026-python:round2-q8-warmup
+rodolfoc2s/rinha-2026-python:round2-cell-prune
 ```
 
 Rodadas locais com `N:\dev\rinha-de-backend\2026\load-test\run.ps1 -Mode round2`
@@ -220,6 +226,7 @@ e dataset de 54.100 requisicoes:
 | frio com `RINHA_INDEX_WARMUP=1` | 2.14ms | 0 | 0 | 54 | 5147.84 |
 | tuning sem atalho de celula, `nprobe=13` | 2.11ms | 0 | 0 | 22 | 5266.62 |
 | tuning conservador com atalho, `nprobe=8` | 2.10ms | 0 | 0 | 37 | 5204.05 |
+| poda exata por caixa quantizada, `nprobe=8` | 1.58-2.21ms | 0 | 0 | 37 | 5182.62-5326.55 |
 
 A conclusao dessa bateria e que o p99 ruim do segundo resultado publico tinha
 perfil de pagina fria/indice ainda nao tocado sob carga. Quando a API so fica
@@ -230,6 +237,18 @@ melhora a deteccao, mas satura a cauda no ambiente oficial. A configuracao atual
 volta a manter `RINHA_CELL_FAST_MARGIN=0.50` e usa `RINHA_IVF_NPROBE=8`, buscando
 um ganho menor de deteccao sem reabrir o p99.
 
+A poda exata nao muda o conjunto de candidatos: para cada celula selecionada,
+o build salva o menor e o maior valor `uint8` de cada dimensao. Em runtime, a
+distancia ate essa caixa e um limite inferior conservador. Depois que o top-k
+esta preenchido, a busca interrompe a varredura apenas quando esse limite e
+estritamente maior que a pior distancia atual. A comparacao offline sobre as
+54.100 entradas preservou todos os scores e reduziu a media de celulas visitadas
+nos fallbacks IVF de `8` para `6.613`.
+
+O p99 local da variante oscilou entre `1.58ms` e `2.21ms`; portanto, o ganho
+de cauda precisa ser confirmado na previa oficial. A propriedade importante
+para esse teste e que a poda preservou `E=37`, sem trocar latencia por recall.
+
 Os resultados locais foram preservados em:
 
 ```text
@@ -239,6 +258,12 @@ N:\dev\rinha-de-backend\2026\load-test\test\results-round2-warmup.json
 ```
 
 O threshold de aprovacao permanece fixo em `fraud_score < 0.6`.
+
+Na previa oficial
+[#7460](https://github.com/zanfranceschi/rinha-de-backend-2026/issues/7460),
+a configuracao anterior (`round2-q8-warmup`) atingiu `p99=4.83ms`, `E=96` e
+score `4471.00`. A imagem `round2-cell-prune` preserva localmente os scores da
+mesma configuracao de busca e tenta reduzir apenas o custo do fallback IVF.
 
 ## Testes
 
@@ -287,6 +312,7 @@ docker compose config
 | `RINHA_INDEX_PRELOAD` | `0` (`1` no compose) | Carrega o indice primario `uint8` em RAM em vez de usar mmap |
 | `RINHA_RERANK_PRELOAD` | `0` | Carrega tambem os vetores `float16` de rerank em RAM; desligado por padrao para preservar memoria |
 | `RINHA_INDEX_WARMUP` | `0` (`1` no compose) | Faz uma varredura completa do indice no startup antes de `/ready` |
+| `RINHA_IVF_CELL_PRUNE` | `0` (`1` no compose) | Usa limites `min/max` quantizados para pular celulas que nao podem entrar no top-k |
 | `RINHA_CELL_FAST_MARGIN` | `1.0` (`0.50` no compose) | Atalho por maioria da celula; `0.50` ativa apenas celulas puras |
 | `RINHA_TREE_CONFIDENCE` | `0.95` (`0.90` no compose) | Confianca minima para a arvore responder sem fallback IVF |
 | `RINHA_TREE_SAMPLE` | `500000` (`2000000` no Dockerfile/compose) | Amostra usada para treinar a arvore confiante no build |
@@ -310,8 +336,8 @@ Proximos passos naturais:
 
 - rodar a bateria oficial via issue `rinha/test` usando a imagem versionada;
 - comparar a previa oficial contra a rodada local `round2` com warmup;
-- varrer `RINHA_IVF_NPROBE=6/8/10` e `RINHA_RERANK_K=8/16/24` para achar o
-  melhor compromisso p99/E;
+- acompanhar se a poda exata reduz a cauda no ambiente oficial sem alterar o
+  erro ponderado;
 - investigar um classificador O(1) melhor para os casos de borda que ainda
   caem no IVF;
 - reduzir tempo de build do indice, que hoje ainda fica na ordem de minutos

@@ -3,6 +3,7 @@ import json
 import numpy as np
 
 from rinha_api.index import (
+    BOUNDS_FILE,
     CENTROIDS_FILE,
     HALF_FILE,
     INDEX_ALGORITHM,
@@ -12,6 +13,7 @@ from rinha_api.index import (
     QUANTIZED_FILE,
     TREE_FILE,
     VectorIndex,
+    build_quantized_cell_bounds,
     index_matches_source,
     load_index,
     quantize_vectors,
@@ -58,6 +60,64 @@ def test_pure_cell_score_uses_cell_majority_fast_path() -> None:
     assert index.score(np.array([0.01] * 14, dtype=np.float32)) == 0.0
 
 
+def test_cell_prune_skips_distant_cells_without_changing_score() -> None:
+    raw_vectors = np.array(
+        [
+            [0.00] * 14,
+            [0.01] * 14,
+            [0.02] * 14,
+            [0.03] * 14,
+            [0.04] * 14,
+            [0.90] * 14,
+            [0.91] * 14,
+            [0.92] * 14,
+            [0.93] * 14,
+            [0.94] * 14,
+        ],
+        dtype=np.float32,
+    )
+    vectors = quantize_vectors(raw_vectors)
+    labels = np.array([0] * 5 + [1] * 5, dtype=np.uint8)
+    centroids = np.array([[0.02] * 14, [0.92] * 14], dtype=np.float32)
+    offsets = np.array([0, 5, 10], dtype=np.int64)
+    bounds = build_quantized_cell_bounds(vectors, centroids, offsets)
+    query = np.array([0.01] * 14, dtype=np.float32)
+    index = VectorIndex(vectors, labels, centroids=centroids, offsets=offsets, bounds=bounds, nprobe=2)
+
+    baseline = index.score(query)
+    index.cell_prune = True
+    index.probe_counts = []
+
+    assert index.score(query) == baseline
+    assert index.probe_counts == [1]
+
+
+def test_cell_prune_keeps_cells_when_lower_bound_ties_worst_candidate() -> None:
+    raw_vectors = np.array(
+        [
+            [0.00] * 14,
+            [0.00] * 14,
+            [0.00] * 14,
+            [0.00] * 14,
+            [0.00] * 14,
+            [0.00] * 14,
+        ],
+        dtype=np.float32,
+    )
+    vectors = quantize_vectors(raw_vectors)
+    labels = np.array([0, 0, 0, 0, 0, 1], dtype=np.uint8)
+    centroids = np.array([[0.00] * 14, [0.00] * 14], dtype=np.float32)
+    offsets = np.array([0, 5, 6], dtype=np.int64)
+    bounds = build_quantized_cell_bounds(vectors, centroids, offsets)
+    index = VectorIndex(vectors, labels, centroids=centroids, offsets=offsets, bounds=bounds, nprobe=2)
+    index.cell_prune = True
+    index.probe_counts = []
+
+    index.score(np.array([0.00] * 14, dtype=np.float32))
+
+    assert index.probe_counts == [2]
+
+
 def test_load_index_prefers_quantized_vectors_and_keeps_half_precision_for_rerank(tmp_path) -> None:
     index_dir = tmp_path / "index"
     index_dir.mkdir()
@@ -93,7 +153,7 @@ def test_index_matches_source_uses_metadata(tmp_path, monkeypatch) -> None:
     references.write_text("[]", encoding="utf-8")
     index_dir = tmp_path / "index"
     index_dir.mkdir()
-    for filename in [QUANTIZED_FILE, HALF_FILE, LABELS_FILE, CENTROIDS_FILE, OFFSETS_FILE, TREE_FILE]:
+    for filename in [QUANTIZED_FILE, HALF_FILE, LABELS_FILE, CENTROIDS_FILE, OFFSETS_FILE, BOUNDS_FILE, TREE_FILE]:
         (index_dir / filename).write_bytes(b"placeholder")
 
     stat = references.stat()
