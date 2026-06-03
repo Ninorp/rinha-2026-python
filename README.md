@@ -216,14 +216,12 @@ RINHA_RERANK_PRELOAD=0
 RINHA_INDEX_WARMUP=1
 RINHA_IVF_CELL_PRUNE=1
 RINHA_IVF_BATCH_CELLS=1
-RINHA_IVF_DEEP_NPROBE=10
-RINHA_IVF_DEEP_COUNTS=3
 ```
 
 Imagem de submissao atual:
 
 ```text
-rodolfoc2s/rinha-2026-python:round2-boundary-deep10
+rodolfoc2s/rinha-2026-python:round2-batch-cells
 ```
 
 Rodadas locais com `N:\dev\rinha-de-backend\2026\load-test\run.ps1 -Mode round2`
@@ -238,7 +236,7 @@ e dataset de 54.100 requisicoes:
 | tuning conservador com atalho, `nprobe=8` | 2.10ms | 0 | 0 | 37 | 5204.05 |
 | poda exata por caixa quantizada, `nprobe=8` | 1.58-2.21ms | 0 | 0 | 37 | 5182.62-5326.55 |
 | poda exata com celulas em lote, `nprobe=8` | 2.12ms | 0 | 0 | 37 | 5200.48 |
-| fallback de fronteira, `nprobe=8 -> 10` em score `0.6` | 2.13ms | 0 | 0 | 33 | 5212.15 |
+| experimento de fronteira, `nprobe=8 -> 10` em score `0.6` | 2.13ms | 0 | 0 | 33 | 5212.15 |
 
 A conclusao dessa bateria e que o p99 ruim do segundo resultado publico tinha
 perfil de pagina fria/indice ainda nao tocado sob carga. Quando a API so fica
@@ -264,14 +262,19 @@ offline, tomando a poda exata como baseline, preservou `score_changes=0` e
 `0.885s`. O teste local `round2` com imagem limpa ficou em `p99=2.12ms`, `E=37`
 e score `5200.48`.
 
-A variante `RINHA_IVF_DEEP_NPROBE=10` aplica uma segunda busca apenas quando o
+O experimento `RINHA_IVF_DEEP_NPROBE=10` aplica uma segunda busca apenas quando o
 proprio fallback IVF retorna 3 fraudes entre os 5 vizinhos, ou seja, score
 `0.6`, a fronteira de negacao do threshold oficial. Essa segunda busca continua
 usando somente o indice de referencias e nao usa payloads do teste como lookup.
 Localmente, ela aumentou o trabalho em 792 das 54.100 entradas e melhorou
 `E=37` para `E=33` com `p99=2.13ms`. A variante que tambem rechecava score
 `0.4` chegou a `E=30`, mas oscilou para `p99=2.61ms` na imagem limpa; por isso a
-configuracao publicada fica no gatilho mais estreito.
+configuracao publicada inicialmente ficou no gatilho mais estreito. Na previa
+oficial
+[#8188](https://github.com/zanfranceschi/rinha-de-backend-2026/issues/8188),
+porem, o ganho de erro foi pequeno (`E=94` contra `E=96`) e o p99 voltou para
+`4.713ms`. A submissao ativa voltou para `round2-batch-cells`, que teve o melhor
+score oficial da familia.
 
 O p99 local das variantes recentes oscilou entre `1.58ms` e `2.21ms`; portanto,
 o ganho de cauda precisa ser confirmado na previa oficial. A propriedade
@@ -343,8 +346,8 @@ docker compose config
 | `RINHA_INDEX_WARMUP` | `0` (`1` no compose) | Faz uma varredura completa do indice no startup antes de `/ready` |
 | `RINHA_IVF_CELL_PRUNE` | `0` (`1` no compose) | Usa limites `min/max` quantizados para pular celulas que nao podem entrar no top-k |
 | `RINHA_IVF_BATCH_CELLS` | `0` (`1` no compose) | Agrupa as celulas restantes da poda exata para reduzir merges pequenos no fallback IVF |
-| `RINHA_IVF_DEEP_NPROBE` | `0` (`10` no compose) | Refaz o fallback IVF com mais celulas quando o score base cai em uma fronteira configurada |
-| `RINHA_IVF_DEEP_COUNTS` | vazio (`3` no compose) | Contagens de fraudes entre os 5 vizinhos que disparam a segunda busca; `3` equivale ao score `0.6` |
+| `RINHA_IVF_DEEP_NPROBE` | `0` | Refaz o fallback IVF com mais celulas quando o score base cai em uma fronteira configurada; experimental, desligado no compose |
+| `RINHA_IVF_DEEP_COUNTS` | vazio | Contagens de fraudes entre os 5 vizinhos que disparam a segunda busca; `3` equivale ao score `0.6` |
 | `RINHA_CELL_FAST_MARGIN` | `1.0` (`0.50` no compose) | Atalho por maioria da celula; `0.50` ativa apenas celulas puras |
 | `RINHA_TREE_CONFIDENCE` | `0.95` (`0.90` no compose) | Confianca minima para a arvore responder sem fallback IVF |
 | `RINHA_TREE_SAMPLE` | `500000` (`2000000` no Dockerfile/compose) | Amostra usada para treinar a arvore confiante no build |
@@ -368,8 +371,8 @@ Proximos passos naturais:
 
 - rodar a bateria oficial via issue `rinha/test` usando a imagem versionada;
 - comparar a previa oficial contra a rodada local `round2` com warmup;
-- acompanhar se o fallback de fronteira reduz `weighted_errors_E` no ambiente
-  oficial sem devolver a cauda ruim vista na variante sem atalho de celula;
+- manter `round2-batch-cells` como submissao ativa enquanto novos caminhos de
+  qualidade nao provarem ganho oficial maior que o custo de p99;
 - investigar um classificador O(1) melhor para os casos de borda que ainda
   caem no IVF;
 - reduzir tempo de build do indice, que hoje ainda fica na ordem de minutos
