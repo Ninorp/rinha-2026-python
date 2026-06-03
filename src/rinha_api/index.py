@@ -94,6 +94,9 @@ class VectorIndex:
         self.batch_cells = env_flag("RINHA_IVF_BATCH_CELLS")
         self.deep_nprobe = max(0, int(os.getenv("RINHA_IVF_DEEP_NPROBE", "0")))
         self.deep_score_counts = env_int_set("RINHA_IVF_DEEP_COUNTS")
+        self.weighted_knn = env_flag("RINHA_WEIGHTED_KNN")
+        self.weighted_eps = float(os.getenv("RINHA_WEIGHTED_EPS", "0.10"))
+        self.score_offset = float(os.getenv("RINHA_SCORE_OFFSET", "0.0"))
         self.probe_counts: list[int] | None = None
         self.cell_scores = self._build_cell_scores()
         self.vector_norms = self._build_vector_norms()
@@ -141,9 +144,7 @@ class VectorIndex:
                 candidate_k,
             )
 
-        best_ids = self._rerank_top_k(query, best_ids, neighbors)
-        frauds = int(np.sum(self.labels[best_ids]))
-        return frauds / float(neighbors)
+        return self._score_reranked(query, best_ids, neighbors)
 
     def _score_ivf(self, query: np.ndarray) -> float:
         assert self.centroids is not None
@@ -193,9 +194,7 @@ class VectorIndex:
                 self.probe_counts.append(visited)
             if best_ids.size == 0:
                 return self._score_exact(query)
-            best_ids = self._rerank_top_k(query_f32, best_ids, neighbors)
-            frauds = int(np.sum(self.labels[best_ids]))
-            return frauds / float(best_ids.shape[0])
+            return self._score_reranked(query_f32, best_ids, neighbors)
 
         best_ids = np.array([], dtype=np.int64)
         best_distances = np.array([], dtype=np.int32 if use_quantized else np.float32)
@@ -242,9 +241,7 @@ class VectorIndex:
         if best_ids.size == 0:
             return self._score_exact(query)
 
-        best_ids = self._rerank_top_k(query_f32, best_ids, neighbors)
-        frauds = int(np.sum(self.labels[best_ids]))
-        return frauds / float(best_ids.shape[0])
+        return self._score_reranked(query_f32, best_ids, neighbors)
 
     def _should_deep_score(self, score: float) -> bool:
         if not self.deep_score_counts:
@@ -376,6 +373,32 @@ class VectorIndex:
         if self.vectors.dtype == np.uint8 and self.rerank_vectors is not None:
             return min(self.rerank_k, self.labels.shape[0])
         return neighbors
+
+    def _score_reranked(self, query: np.ndarray, candidate_ids: np.ndarray, k: int) -> float:
+        take = min(k, candidate_ids.shape[0])
+        if self.rerank_vectors is None or take <= 0:
+            best_ids = candidate_ids[:take]
+            frauds = int(np.sum(self.labels[best_ids]))
+            return frauds / float(max(1, best_ids.shape[0]))
+
+        vectors = self.rerank_vectors[candidate_ids].astype(np.float32, copy=False)
+        query_f32 = query.astype(np.float32, copy=False)
+        diff = vectors - query_f32
+        distances = np.sum(diff * diff, axis=1, dtype=np.float32)
+        if candidate_ids.shape[0] > take:
+            best = np.argpartition(distances, take - 1)[:take]
+        else:
+            best = np.arange(candidate_ids.shape[0], dtype=np.int64)
+        best_ids = candidate_ids[best]
+
+        if self.weighted_knn:
+            labels = self.labels[best_ids].astype(np.float32, copy=False)
+            weights = 1.0 / (distances[best] + self.weighted_eps)
+            score = float(np.sum(labels * weights, dtype=np.float32) / np.sum(weights, dtype=np.float32))
+            return min(1.0, max(0.0, score + self.score_offset))
+
+        frauds = int(np.sum(self.labels[best_ids]))
+        return frauds / float(best_ids.shape[0])
 
     def _rerank_top_k(self, query: np.ndarray, candidate_ids: np.ndarray, k: int) -> np.ndarray:
         if self.rerank_vectors is None or candidate_ids.shape[0] <= k:
