@@ -190,6 +190,28 @@ def test_deep_fallback_rechecks_boundary_ivf_score() -> None:
     assert index.score(query) < 0.6
 
 
+def test_weighted_rerank_uses_neighbor_distance(monkeypatch) -> None:
+    monkeypatch.setenv("RINHA_WEIGHTED_KNN", "1")
+    monkeypatch.setenv("RINHA_WEIGHTED_EPS", "0.10")
+
+    raw_vectors = np.array(
+        [
+            [0.00] * 14,
+            [0.70] * 14,
+            [0.71] * 14,
+            [0.72] * 14,
+            [0.73] * 14,
+        ],
+        dtype=np.float32,
+    )
+    labels = np.array([0, 1, 1, 1, 1], dtype=np.uint8)
+    index = VectorIndex(quantize_vectors(raw_vectors), labels, rerank_vectors=raw_vectors)
+    candidates = np.arange(5, dtype=np.int64)
+    query = np.array([0.0] * 14, dtype=np.float32)
+
+    assert index._score_reranked(query, candidates, 5) < 0.6
+
+
 def test_load_index_prefers_quantized_vectors_and_keeps_half_precision_for_rerank(tmp_path) -> None:
     index_dir = tmp_path / "index"
     index_dir.mkdir()

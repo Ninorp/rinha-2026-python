@@ -33,7 +33,7 @@ services:
       ROBYN_LOG_LEVEL: "WARN"
       ROBYN_PROCESSES: "1"
       ROBYN_WORKERS: "1"
-      RINHA_IVF_NPROBE: "10"
+      RINHA_IVF_NPROBE: "96"
       RINHA_RERANK_K: "10"
       RINHA_IVF_CELLS: "8192"
       RINHA_IVF_SAMPLE: "250000"
@@ -48,7 +48,10 @@ services:
       RINHA_IVF_CELL_PRUNE: "1"
       RINHA_IVF_BATCH_CELLS: "1"
       RINHA_TREE_CONFIDENCE: "0.90"
-      RINHA_CELL_FAST_MARGIN: "0.50"
+      RINHA_CELL_FAST_MARGIN: "1.00"
+      RINHA_WEIGHTED_KNN: "1"
+      RINHA_WEIGHTED_EPS: "0.10"
+      RINHA_SCORE_OFFSET: "0.10"
     deploy:
       resources:
         limits:
