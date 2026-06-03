@@ -15,7 +15,7 @@ services:
           memory: "20MB"
 
   api1: &api
-    image: rodolfoc2s/rinha-2026-python:round2-batch-cells
+    image: rodolfoc2s/rinha-2026-python:round2-nprobe10-k10
     environment:
       ROBYN_HOST: "0.0.0.0"
       ROBYN_PORT: "8080"
