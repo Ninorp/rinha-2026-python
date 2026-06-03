@@ -32,6 +32,16 @@ def env_flag(name: str, default: str = "0") -> bool:
     return os.getenv(name, default).lower() in TRUTHY
 
 
+def env_int_set(name: str) -> set[int]:
+    raw = os.getenv(name, "")
+    values: set[int] = set()
+    for part in raw.split(","):
+        part = part.strip()
+        if part:
+            values.add(int(part))
+    return values
+
+
 class VectorIndex:
     def __init__(
         self,
@@ -82,6 +92,8 @@ class VectorIndex:
         self.tree_confidence = float(os.getenv("RINHA_TREE_CONFIDENCE", str(DEFAULT_TREE_CONFIDENCE)))
         self.cell_prune = env_flag("RINHA_IVF_CELL_PRUNE")
         self.batch_cells = env_flag("RINHA_IVF_BATCH_CELLS")
+        self.deep_nprobe = max(0, int(os.getenv("RINHA_IVF_DEEP_NPROBE", "0")))
+        self.deep_score_counts = env_int_set("RINHA_IVF_DEEP_COUNTS")
         self.probe_counts: list[int] | None = None
         self.cell_scores = self._build_cell_scores()
         self.vector_norms = self._build_vector_norms()
@@ -147,6 +159,23 @@ class VectorIndex:
             cell_score = float(self.cell_scores[nearest])
             if cell_score <= 0.5 - self.fast_margin or cell_score >= 0.5 + self.fast_margin:
                 return cell_score
+
+        score = self._score_ivf_probe(query, query_f32, query_norm, center_distances, probes)
+        deep_probes = min(self.deep_nprobe, self.centroids.shape[0])
+        if deep_probes > probes and self._should_deep_score(score):
+            return self._score_ivf_probe(query, query_f32, query_norm, center_distances, deep_probes)
+        return score
+
+    def _score_ivf_probe(
+        self,
+        query: np.ndarray,
+        query_f32: np.ndarray,
+        query_norm: float,
+        center_distances: np.ndarray,
+        probes: int,
+    ) -> float:
+        assert self.offsets is not None
+
         cells = np.argpartition(center_distances, probes - 1)[:probes]
         use_quantized = self.vectors.dtype == np.uint8
         quantized = quantize_vector(query).astype(np.int16, copy=False) if use_quantized else None
@@ -216,6 +245,15 @@ class VectorIndex:
         best_ids = self._rerank_top_k(query_f32, best_ids, neighbors)
         frauds = int(np.sum(self.labels[best_ids]))
         return frauds / float(best_ids.shape[0])
+
+    def _should_deep_score(self, score: float) -> bool:
+        if not self.deep_score_counts:
+            return False
+        neighbors = min(5, self.labels.shape[0])
+        if neighbors <= 0:
+            return False
+        fraud_count = int(round(score * neighbors))
+        return fraud_count in self.deep_score_counts and abs(score - fraud_count / float(neighbors)) < 1e-6
 
     def _score_ivf_batched(
         self,

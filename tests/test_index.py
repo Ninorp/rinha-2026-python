@@ -156,6 +156,40 @@ def test_batch_cell_scan_preserves_cell_prune_score() -> None:
     assert index.probe_counts == [2]
 
 
+def test_deep_fallback_rechecks_boundary_ivf_score() -> None:
+    raw_vectors = np.array(
+        [
+            [0.070] * 14,
+            [0.071] * 14,
+            [0.072] * 14,
+            [0.080] * 14,
+            [0.090] * 14,
+            [0.050] * 14,
+            [0.051] * 14,
+            [0.052] * 14,
+            [0.053] * 14,
+            [0.054] * 14,
+        ],
+        dtype=np.float32,
+    )
+    vectors = quantize_vectors(raw_vectors)
+    labels = np.array([1, 1, 1, 0, 0] + [0, 0, 0, 0, 0], dtype=np.uint8)
+    centroids = np.array([[0.060] * 14, [0.200] * 14], dtype=np.float32)
+    offsets = np.array([0, 5, 10], dtype=np.int64)
+    bounds = build_quantized_cell_bounds(vectors, centroids, offsets)
+    query = np.array([0.050] * 14, dtype=np.float32)
+    index = VectorIndex(vectors, labels, centroids=centroids, offsets=offsets, bounds=bounds, nprobe=1)
+    index.cell_prune = True
+    index.batch_cells = True
+
+    assert index.score(query) == 0.6
+
+    index.deep_nprobe = 2
+    index.deep_score_counts = {3}
+
+    assert index.score(query) < 0.6
+
+
 def test_load_index_prefers_quantized_vectors_and_keeps_half_precision_for_rerank(tmp_path) -> None:
     index_dir = tmp_path / "index"
     index_dir.mkdir()
