@@ -278,13 +278,13 @@ class VectorIndex:
             end = int(self.offsets[int(cell) + 1])
             if end <= start:
                 continue
-            ids, distances = self._quantized_cell_distances(start, end, quantized)
+            distances = self._quantized_cell_distances(start, end, quantized)
             take = min(candidate_k, distances.shape[0])
             local = np.argpartition(distances, take - 1)[:take]
             best_ids, best_distances = self._merge_top_k(
                 best_ids,
                 best_distances,
-                ids[local],
+                start + local,
                 distances[local],
                 candidate_k,
             )
@@ -306,8 +306,8 @@ class VectorIndex:
             end = int(self.offsets[int(cell) + 1])
             if end <= start:
                 continue
-            ids, distances = self._quantized_cell_distances(start, end, quantized)
-            ids_parts.append(ids)
+            distances = self._quantized_cell_distances(start, end, quantized)
+            ids_parts.append(np.arange(start, end, dtype=np.int64))
             distance_parts.append(distances)
 
         if not ids_parts:
@@ -331,12 +331,12 @@ class VectorIndex:
         start: int,
         end: int,
         quantized: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray]:
+    ) -> np.ndarray:
         block = self.vectors[start:end].astype(np.int16, copy=False)
         diff = block - quantized
         diff32 = diff.astype(np.int32, copy=False)
         distances = np.sum(diff32 * diff32, axis=1, dtype=np.int32)
-        return np.arange(start, end, dtype=np.int64), distances
+        return distances
 
     def _cell_lower_bounds(self, cells: np.ndarray, quantized: np.ndarray | None) -> np.ndarray | None:
         if (
