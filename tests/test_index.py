@@ -118,6 +118,44 @@ def test_cell_prune_keeps_cells_when_lower_bound_ties_worst_candidate() -> None:
     assert index.probe_counts == [2]
 
 
+def test_batch_cell_scan_preserves_cell_prune_score() -> None:
+    raw_vectors = np.array(
+        [
+            [0.00] * 14,
+            [0.01] * 14,
+            [0.02] * 14,
+            [0.03] * 14,
+            [0.04] * 14,
+            [0.10] * 14,
+            [0.11] * 14,
+            [0.12] * 14,
+            [0.13] * 14,
+            [0.14] * 14,
+            [0.90] * 14,
+            [0.91] * 14,
+            [0.92] * 14,
+            [0.93] * 14,
+            [0.94] * 14,
+        ],
+        dtype=np.float32,
+    )
+    vectors = quantize_vectors(raw_vectors)
+    labels = np.array([0] * 5 + [1] * 5 + [1] * 5, dtype=np.uint8)
+    centroids = np.array([[0.02] * 14, [0.12] * 14, [0.92] * 14], dtype=np.float32)
+    offsets = np.array([0, 5, 10, 15], dtype=np.int64)
+    bounds = build_quantized_cell_bounds(vectors, centroids, offsets)
+    query = np.array([0.05] * 14, dtype=np.float32)
+    index = VectorIndex(vectors, labels, centroids=centroids, offsets=offsets, bounds=bounds, nprobe=3)
+    index.cell_prune = True
+
+    baseline = index.score(query)
+    index.batch_cells = True
+    index.probe_counts = []
+
+    assert index.score(query) == baseline
+    assert index.probe_counts == [2]
+
+
 def test_load_index_prefers_quantized_vectors_and_keeps_half_precision_for_rerank(tmp_path) -> None:
     index_dir = tmp_path / "index"
     index_dir.mkdir()

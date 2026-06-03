@@ -46,6 +46,13 @@ page fault; em desenvolvimento, isso pode ser desligado com
 `/ready` so responda 200 depois de tocar o indice e remover a cauda fria vista
 na primeira carga.
 
+Quando o fallback IVF e necessario, as celulas selecionadas sao ordenadas por
+um limite inferior exato calculado a partir da caixa `min/max` quantizada. Depois
+que o top-k inicial esta preenchido, a implementacao atual agrupa as celulas que
+ainda podem empatar ou melhorar a pior distancia atual e faz uma unica fusao de
+candidatos. Isso preserva a decisao da poda exata, mas reduz o custo Python de
+muitas chamadas pequenas de `argpartition`/merge no caminho de cauda.
+
 A imagem Docker gera o indice durante o build; se os arquivos de indice nao
 existirem, a aplicacao sobe com um indice vazio apenas para manter o contrato de
 saude.
@@ -208,12 +215,13 @@ RINHA_INDEX_PRELOAD=1
 RINHA_RERANK_PRELOAD=0
 RINHA_INDEX_WARMUP=1
 RINHA_IVF_CELL_PRUNE=1
+RINHA_IVF_BATCH_CELLS=1
 ```
 
 Imagem de submissao atual:
 
 ```text
-rodolfoc2s/rinha-2026-python:round2-cell-prune
+rodolfoc2s/rinha-2026-python:round2-batch-cells
 ```
 
 Rodadas locais com `N:\dev\rinha-de-backend\2026\load-test\run.ps1 -Mode round2`
@@ -227,6 +235,7 @@ e dataset de 54.100 requisicoes:
 | tuning sem atalho de celula, `nprobe=13` | 2.11ms | 0 | 0 | 22 | 5266.62 |
 | tuning conservador com atalho, `nprobe=8` | 2.10ms | 0 | 0 | 37 | 5204.05 |
 | poda exata por caixa quantizada, `nprobe=8` | 1.58-2.21ms | 0 | 0 | 37 | 5182.62-5326.55 |
+| poda exata com celulas em lote, `nprobe=8` | 2.12ms | 0 | 0 | 37 | 5200.48 |
 
 A conclusao dessa bateria e que o p99 ruim do segundo resultado publico tinha
 perfil de pagina fria/indice ainda nao tocado sob carga. Quando a API so fica
@@ -245,9 +254,17 @@ estritamente maior que a pior distancia atual. A comparacao offline sobre as
 54.100 entradas preservou todos os scores e reduziu a media de celulas visitadas
 nos fallbacks IVF de `8` para `6.613`.
 
-O p99 local da variante oscilou entre `1.58ms` e `2.21ms`; portanto, o ganho
-de cauda precisa ser confirmado na previa oficial. A propriedade importante
-para esse teste e que a poda preservou `E=37`, sem trocar latencia por recall.
+A variante `RINHA_IVF_BATCH_CELLS=1` mantem a mesma regra de poda, mas evita
+fundir candidatos celula a celula no trecho restante do fallback. No comparador
+offline, tomando a poda exata como baseline, preservou `score_changes=0` e
+`approval_changes=0`, reduzindo o tempo total da comparacao de `1.056s` para
+`0.885s`. O teste local `round2` com imagem limpa ficou em `p99=2.12ms`, `E=37`
+e score `5200.48`.
+
+O p99 local das variantes recentes oscilou entre `1.58ms` e `2.21ms`; portanto,
+o ganho de cauda precisa ser confirmado na previa oficial. A propriedade
+importante para esse teste e que a poda preservou `E=37`, sem trocar latencia
+por recall.
 
 Os resultados locais foram preservados em:
 
@@ -313,6 +330,7 @@ docker compose config
 | `RINHA_RERANK_PRELOAD` | `0` | Carrega tambem os vetores `float16` de rerank em RAM; desligado por padrao para preservar memoria |
 | `RINHA_INDEX_WARMUP` | `0` (`1` no compose) | Faz uma varredura completa do indice no startup antes de `/ready` |
 | `RINHA_IVF_CELL_PRUNE` | `0` (`1` no compose) | Usa limites `min/max` quantizados para pular celulas que nao podem entrar no top-k |
+| `RINHA_IVF_BATCH_CELLS` | `0` (`1` no compose) | Agrupa as celulas restantes da poda exata para reduzir merges pequenos no fallback IVF |
 | `RINHA_CELL_FAST_MARGIN` | `1.0` (`0.50` no compose) | Atalho por maioria da celula; `0.50` ativa apenas celulas puras |
 | `RINHA_TREE_CONFIDENCE` | `0.95` (`0.90` no compose) | Confianca minima para a arvore responder sem fallback IVF |
 | `RINHA_TREE_SAMPLE` | `500000` (`2000000` no Dockerfile/compose) | Amostra usada para treinar a arvore confiante no build |
@@ -336,8 +354,8 @@ Proximos passos naturais:
 
 - rodar a bateria oficial via issue `rinha/test` usando a imagem versionada;
 - comparar a previa oficial contra a rodada local `round2` com warmup;
-- acompanhar se a poda exata reduz a cauda no ambiente oficial sem alterar o
-  erro ponderado;
+- acompanhar se a poda exata em lote reduz a cauda no ambiente oficial sem
+  alterar o erro ponderado;
 - investigar um classificador O(1) melhor para os casos de borda que ainda
   caem no IVF;
 - reduzir tempo de build do indice, que hoje ainda fica na ordem de minutos

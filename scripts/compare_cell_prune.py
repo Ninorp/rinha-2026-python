@@ -11,8 +11,9 @@ from rinha_api.index import build_quantized_cell_bounds, load_index
 from rinha_api.vectorize import DEFAULT_MCC_RISK, DEFAULT_NORMALIZATION, vectorize_payload
 
 
-def score_entries(index, vectors, cell_prune: bool) -> tuple[list[float], float]:
+def score_entries(index, vectors, cell_prune: bool, batch_cells: bool = False) -> tuple[list[float], float]:
     index.cell_prune = cell_prune
+    index.batch_cells = batch_cells
     index.probe_counts = [] if cell_prune else None
     started = perf_counter()
     scores = [index.score(vector) for vector in vectors]
@@ -23,6 +24,8 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--test-data", default="../load-test/test-data.json")
     parser.add_argument("--nprobe", type=int, default=8)
+    parser.add_argument("--baseline-cell-prune", action="store_true")
+    parser.add_argument("--compare-batch-cells", action="store_true")
     parser.add_argument("--disable-tree", action="store_true")
     parser.add_argument("--disable-cell-fast-path", action="store_true")
     args = parser.parse_args()
@@ -44,8 +47,8 @@ def main() -> None:
     entries = json.loads(Path(args.test_data).read_bytes())["entries"]
     vectors = [vectorize_payload(entry["request"], normalization, mcc_risk) for entry in entries]
 
-    baseline, baseline_seconds = score_entries(index, vectors, cell_prune=False)
-    pruned, pruned_seconds = score_entries(index, vectors, cell_prune=True)
+    baseline, baseline_seconds = score_entries(index, vectors, cell_prune=args.baseline_cell_prune)
+    pruned, pruned_seconds = score_entries(index, vectors, cell_prune=True, batch_cells=args.compare_batch_cells)
     score_changes = sum(left != right for left, right in zip(baseline, pruned))
     approval_changes = sum((left < 0.6) != (right < 0.6) for left, right in zip(baseline, pruned))
     probe_counts = index.probe_counts or []
@@ -55,7 +58,9 @@ def main() -> None:
     print(
         f"entries={len(entries)} nprobe={args.nprobe} "
         f"tree={'off' if args.disable_tree else 'on'} "
-        f"cell_fast={'off' if args.disable_cell_fast_path else 'on'}"
+        f"baseline_cell_prune={'on' if args.baseline_cell_prune else 'off'} "
+        f"cell_fast={'off' if args.disable_cell_fast_path else 'on'} "
+        f"batch_cells={'on' if args.compare_batch_cells else 'off'}"
     )
     print(
         f"baseline={baseline_seconds:.3f}s pruned={pruned_seconds:.3f}s "

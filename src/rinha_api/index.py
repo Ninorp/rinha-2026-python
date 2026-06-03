@@ -81,6 +81,7 @@ class VectorIndex:
         self.rerank_k = max(5, int(os.getenv("RINHA_RERANK_K", str(DEFAULT_RERANK_K))))
         self.tree_confidence = float(os.getenv("RINHA_TREE_CONFIDENCE", str(DEFAULT_TREE_CONFIDENCE)))
         self.cell_prune = env_flag("RINHA_IVF_CELL_PRUNE")
+        self.batch_cells = env_flag("RINHA_IVF_BATCH_CELLS")
         self.probe_counts: list[int] | None = None
         self.cell_scores = self._build_cell_scores()
         self.vector_norms = self._build_vector_norms()
@@ -157,6 +158,16 @@ class VectorIndex:
 
         neighbors = min(5, self.labels.shape[0])
         candidate_k = self._candidate_k(neighbors)
+        if self.batch_cells and use_quantized and lower_bounds is not None:
+            best_ids, visited = self._score_ivf_batched(cells, lower_bounds, quantized, candidate_k)
+            if self.probe_counts is not None:
+                self.probe_counts.append(visited)
+            if best_ids.size == 0:
+                return self._score_exact(query)
+            best_ids = self._rerank_top_k(query_f32, best_ids, neighbors)
+            frauds = int(np.sum(self.labels[best_ids]))
+            return frauds / float(best_ids.shape[0])
+
         best_ids = np.array([], dtype=np.int64)
         best_distances = np.array([], dtype=np.int32 if use_quantized else np.float32)
 
@@ -205,6 +216,89 @@ class VectorIndex:
         best_ids = self._rerank_top_k(query_f32, best_ids, neighbors)
         frauds = int(np.sum(self.labels[best_ids]))
         return frauds / float(best_ids.shape[0])
+
+    def _score_ivf_batched(
+        self,
+        cells: np.ndarray,
+        lower_bounds: np.ndarray,
+        quantized: np.ndarray | None,
+        candidate_k: int,
+    ) -> tuple[np.ndarray, int]:
+        assert self.offsets is not None
+        assert quantized is not None
+
+        best_ids = np.array([], dtype=np.int64)
+        best_distances = np.array([], dtype=np.int32)
+        visited = 0
+        position = 0
+
+        while position < cells.shape[0] and best_ids.size < candidate_k:
+            cell = cells[position]
+            position += 1
+            visited += 1
+            start = int(self.offsets[cell])
+            end = int(self.offsets[int(cell) + 1])
+            if end <= start:
+                continue
+            ids, distances = self._quantized_cell_distances(start, end, quantized)
+            take = min(candidate_k, distances.shape[0])
+            local = np.argpartition(distances, take - 1)[:take]
+            best_ids, best_distances = self._merge_top_k(
+                best_ids,
+                best_distances,
+                ids[local],
+                distances[local],
+                candidate_k,
+            )
+
+        if best_ids.size < candidate_k or position >= cells.shape[0]:
+            return best_ids, visited
+
+        worst = int(np.max(best_distances))
+        scan_end = int(np.searchsorted(lower_bounds, worst, side="right"))
+        scan_end = max(scan_end, position)
+        if scan_end <= position:
+            return best_ids, visited
+
+        ids_parts: list[np.ndarray] = []
+        distance_parts: list[np.ndarray] = []
+        for cell in cells[position:scan_end]:
+            visited += 1
+            start = int(self.offsets[cell])
+            end = int(self.offsets[int(cell) + 1])
+            if end <= start:
+                continue
+            ids, distances = self._quantized_cell_distances(start, end, quantized)
+            ids_parts.append(ids)
+            distance_parts.append(distances)
+
+        if not ids_parts:
+            return best_ids, visited
+
+        ids = np.concatenate(ids_parts)
+        distances = np.concatenate(distance_parts)
+        take = min(candidate_k, distances.shape[0])
+        local = np.argpartition(distances, take - 1)[:take]
+        best_ids, best_distances = self._merge_top_k(
+            best_ids,
+            best_distances,
+            ids[local],
+            distances[local],
+            candidate_k,
+        )
+        return best_ids, visited
+
+    def _quantized_cell_distances(
+        self,
+        start: int,
+        end: int,
+        quantized: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        block = self.vectors[start:end].astype(np.int16, copy=False)
+        diff = block - quantized
+        diff32 = diff.astype(np.int32, copy=False)
+        distances = np.sum(diff32 * diff32, axis=1, dtype=np.int32)
+        return np.arange(start, end, dtype=np.int64), distances
 
     def _cell_lower_bounds(self, cells: np.ndarray, quantized: np.ndarray | None) -> np.ndarray | None:
         if (
