@@ -23,7 +23,7 @@ services:
       ROBYN_PROCESSES: "1"
       ROBYN_WORKERS: "1"
       RINHA_IVF_NPROBE: "32"
-      RINHA_RERANK_K: "10"
+      RINHA_RERANK_K: "12"
       RINHA_IVF_CELLS: "8192"
       RINHA_IVF_SAMPLE: "250000"
       RINHA_IVF_ITERATIONS: "6"
@@ -37,7 +37,7 @@ services:
       RINHA_IVF_CELL_PRUNE: "1"
       RINHA_IVF_BATCH_CELLS: "1"
       RINHA_TREE_CONFIDENCE: "0.90"
-      RINHA_CELL_FAST_MARGIN: "0.45"
+      RINHA_CELL_FAST_MARGIN: "0.50"
     deploy:
       resources:
         limits:
