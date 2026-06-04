@@ -15,7 +15,7 @@ services:
           memory: "20MB"
 
   api1: &api
-    image: rodolfoc2s/rinha-2026-python:querytree-tiebreak10
+    image: rodolfoc2s/rinha-2026-python:round2-weighted96
     environment:
       ROBYN_HOST: "0.0.0.0"
       ROBYN_PORT: "8080"
@@ -37,9 +37,6 @@ services:
       RINHA_IVF_CELL_PRUNE: "1"
       RINHA_IVF_BATCH_CELLS: "1"
       RINHA_TREE_CONFIDENCE: "0.90"
-      RINHA_QUERY_TREE_CONFIDENCE: "0.95"
-      RINHA_QUERY_TREE_APPROVE_ONLY: "1"
-      RINHA_QUERY_TREE_TIEBREAK_LOW: "0.10"
       RINHA_CELL_FAST_MARGIN: "0.50"
     deploy:
       resources:
