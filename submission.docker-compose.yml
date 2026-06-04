@@ -11,7 +11,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.10"
+          cpus: "0.20"
           memory: "20MB"
 
   api1: &api
@@ -38,13 +38,12 @@ services:
       RINHA_IVF_BATCH_CELLS: "1"
       RINHA_TREE_CONFIDENCE: "0.90"
       RINHA_CELL_FAST_MARGIN: "0.50"
-      RINHA_WEIGHTED_KNN: "1"
-      RINHA_WEIGHTED_EPS: "0.10"
-      RINHA_SCORE_OFFSET: "0.10"
+      RINHA_IVF_DEEP_NPROBE: "48"
+      RINHA_IVF_DEEP_COUNTS: "2"
     deploy:
       resources:
         limits:
-          cpus: "0.45"
+          cpus: "0.40"
           memory: "165MB"
 
   api2:
