@@ -94,6 +94,7 @@ class VectorIndex:
         self.rerank_k = max(5, int(os.getenv("RINHA_RERANK_K", str(DEFAULT_RERANK_K))))
         self.tree_confidence = float(os.getenv("RINHA_TREE_CONFIDENCE", str(DEFAULT_TREE_CONFIDENCE)))
         self.query_tree_confidence = float(os.getenv("RINHA_QUERY_TREE_CONFIDENCE", "0.98"))
+        self.query_tree_approve_only = env_flag("RINHA_QUERY_TREE_APPROVE_ONLY")
         self.cell_prune = env_flag("RINHA_IVF_CELL_PRUNE")
         self.batch_cells = env_flag("RINHA_IVF_BATCH_CELLS")
         self.deep_nprobe = max(0, int(os.getenv("RINHA_IVF_DEEP_NPROBE", "0")))
@@ -544,6 +545,8 @@ class VectorIndex:
             return None
 
         score = score_tree(self.query_tree, query)
+        if self.query_tree_approve_only and score >= 0.6:
+            return None
         if score <= 1.0 - self.query_tree_confidence or score >= self.query_tree_confidence:
             return score
         return None

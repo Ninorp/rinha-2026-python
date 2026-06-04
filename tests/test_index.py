@@ -274,6 +274,23 @@ def test_uncertain_query_tree_falls_back_to_index() -> None:
     assert index.score(np.array([0.9] * 14, dtype=np.float32)) == 0.0
 
 
+def test_query_tree_approve_only_falls_back_for_fraud_score(monkeypatch) -> None:
+    monkeypatch.setenv("RINHA_QUERY_TREE_APPROVE_ONLY", "1")
+
+    vectors = quantize_vectors(np.array([[0.0] * 14, [1.0] * 14], dtype=np.float32))
+    labels = np.array([0, 0], dtype=np.uint8)
+    query_tree = {
+        "scores": np.array([1.0], dtype=np.float32),
+        "features": np.array([-1], dtype=np.int16),
+        "thresholds": np.array([0.0], dtype=np.float32),
+        "left": np.array([-1], dtype=np.int32),
+        "right": np.array([-1], dtype=np.int32),
+    }
+    index = VectorIndex(vectors, labels, query_tree=query_tree)
+
+    assert index.score(np.array([0.9] * 14, dtype=np.float32)) == 0.0
+
+
 def test_tree_tiebreak_can_lower_borderline_ivf_score() -> None:
     vectors = quantize_vectors(
         np.array(

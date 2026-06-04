@@ -49,6 +49,7 @@ services:
       RINHA_IVF_BATCH_CELLS: "1"
       RINHA_TREE_CONFIDENCE: "0.90"
       RINHA_QUERY_TREE_CONFIDENCE: "0.95"
+      RINHA_QUERY_TREE_APPROVE_ONLY: "1"
       RINHA_CELL_FAST_MARGIN: "0.50"
     deploy:
       resources:
