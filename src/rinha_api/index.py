@@ -95,6 +95,7 @@ class VectorIndex:
         self.tree_confidence = float(os.getenv("RINHA_TREE_CONFIDENCE", str(DEFAULT_TREE_CONFIDENCE)))
         self.query_tree_confidence = float(os.getenv("RINHA_QUERY_TREE_CONFIDENCE", "0.98"))
         self.query_tree_approve_only = env_flag("RINHA_QUERY_TREE_APPROVE_ONLY")
+        self.query_tree_tiebreak_low = float(os.getenv("RINHA_QUERY_TREE_TIEBREAK_LOW", "0.20"))
         self.cell_prune = env_flag("RINHA_IVF_CELL_PRUNE")
         self.batch_cells = env_flag("RINHA_IVF_BATCH_CELLS")
         self.deep_nprobe = max(0, int(os.getenv("RINHA_IVF_DEEP_NPROBE", "0")))
@@ -112,15 +113,33 @@ class VectorIndex:
     def score(self, query: np.ndarray) -> float:
         if self.labels.shape[0] == 0:
             return 1.0
-        query_tree_score = self._score_query_tree(query)
-        if query_tree_score is not None:
-            return query_tree_score
+        query_tree_score = self._raw_query_tree_score(query)
+        query_tree_shortcut = self._score_query_tree(query_tree_score)
+        if query_tree_shortcut is not None:
+            return query_tree_shortcut
         tree_score = self._score_tree(query, confident_only=False)
         if tree_score is not None and self._is_confident_tree_score(tree_score):
             return tree_score
         if self.centroids is not None and self.offsets is not None:
-            return self._score_ivf(query, tree_score)
-        return self._score_exact(query)
+            return self._score_ivf(query, tree_score, query_tree_score)
+        return self._score_with_query_tree_tiebreak(self._score_exact(query), query_tree_score)
+
+    def _raw_query_tree_score(self, query: np.ndarray) -> float | None:
+        if self.query_tree is None:
+            return None
+        return score_tree(self.query_tree, query)
+
+    def _score_query_tree(self, query_tree_score: float | None) -> float | None:
+        if query_tree_score is None:
+            return None
+        if self.query_tree_approve_only and query_tree_score >= 0.6:
+            return None
+        if (
+            query_tree_score <= 1.0 - self.query_tree_confidence
+            or query_tree_score >= self.query_tree_confidence
+        ):
+            return query_tree_score
+        return None
 
     def _score_exact(self, query: np.ndarray) -> float:
         neighbors = min(5, self.labels.shape[0])
@@ -157,7 +176,12 @@ class VectorIndex:
 
         return self._score_reranked(query, best_ids, neighbors)
 
-    def _score_ivf(self, query: np.ndarray, tree_score: float | None = None) -> float:
+    def _score_ivf(
+        self,
+        query: np.ndarray,
+        tree_score: float | None = None,
+        query_tree_score: float | None = None,
+    ) -> float:
         assert self.centroids is not None
         assert self.offsets is not None
         assert self.centroid_norms is not None
@@ -191,8 +215,8 @@ class VectorIndex:
                 initial_distances=best_distances,
                 skip_cells=probed_cells,
             )
-            return self._score_with_tree_tiebreak(deep_score, tree_score)
-        return self._score_with_tree_tiebreak(score, tree_score)
+            return self._score_with_tiebreaks(deep_score, tree_score, query_tree_score)
+        return self._score_with_tiebreaks(score, tree_score, query_tree_score)
 
     def _score_ivf_probe(
         self,
@@ -505,6 +529,22 @@ class VectorIndex:
             return 0.6
         return score
 
+    def _score_with_query_tree_tiebreak(self, score: float, query_tree_score: float | None) -> float:
+        if query_tree_score is None:
+            return score
+        if abs(score - 0.6) < 1e-6 and query_tree_score <= self.query_tree_tiebreak_low:
+            return 0.4
+        return score
+
+    def _score_with_tiebreaks(
+        self,
+        score: float,
+        tree_score: float | None,
+        query_tree_score: float | None,
+    ) -> float:
+        score = self._score_with_tree_tiebreak(score, tree_score)
+        return self._score_with_query_tree_tiebreak(score, query_tree_score)
+
     def _is_confident_tree_score(self, score: float) -> bool:
         return score <= 1.0 - self.tree_confidence or score >= self.tree_confidence
 
@@ -540,16 +580,6 @@ class VectorIndex:
             for values in self.query_tree.values():
                 _ = values.shape
 
-    def _score_query_tree(self, query: np.ndarray) -> float | None:
-        if self.query_tree is None:
-            return None
-
-        score = score_tree(self.query_tree, query)
-        if self.query_tree_approve_only and score >= 0.6:
-            return None
-        if score <= 1.0 - self.query_tree_confidence or score >= self.query_tree_confidence:
-            return score
-        return None
 
 
 def load_index(index_dir: Path) -> VectorIndex:

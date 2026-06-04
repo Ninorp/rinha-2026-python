@@ -291,6 +291,37 @@ def test_query_tree_approve_only_falls_back_for_fraud_score(monkeypatch) -> None
     assert index.score(np.array([0.9] * 14, dtype=np.float32)) == 0.0
 
 
+def test_query_tree_tiebreak_can_lower_borderline_ivf_score(monkeypatch) -> None:
+    monkeypatch.setenv("RINHA_QUERY_TREE_APPROVE_ONLY", "1")
+    monkeypatch.setenv("RINHA_QUERY_TREE_TIEBREAK_LOW", "0.20")
+
+    vectors = quantize_vectors(
+        np.array(
+            [
+                [0.00] * 14,
+                [0.01] * 14,
+                [0.02] * 14,
+                [0.03] * 14,
+                [0.04] * 14,
+            ],
+            dtype=np.float32,
+        )
+    )
+    labels = np.array([1, 1, 1, 0, 0], dtype=np.uint8)
+    centroids = np.array([[0.02] * 14], dtype=np.float32)
+    offsets = np.array([0, 5], dtype=np.int64)
+    query_tree = {
+        "scores": np.array([0.10], dtype=np.float32),
+        "features": np.array([-1], dtype=np.int16),
+        "thresholds": np.array([0.0], dtype=np.float32),
+        "left": np.array([-1], dtype=np.int32),
+        "right": np.array([-1], dtype=np.int32),
+    }
+    index = VectorIndex(vectors, labels, centroids=centroids, offsets=offsets, query_tree=query_tree)
+
+    assert index.score(np.array([0.02] * 14, dtype=np.float32)) == 0.4
+
+
 def test_tree_tiebreak_can_lower_borderline_ivf_score() -> None:
     vectors = quantize_vectors(
         np.array(
