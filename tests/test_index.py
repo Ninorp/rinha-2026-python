@@ -186,8 +186,10 @@ def test_deep_fallback_rechecks_boundary_ivf_score() -> None:
 
     index.deep_nprobe = 2
     index.deep_score_counts = {3}
+    index.probe_counts = []
 
     assert index.score(query) < 0.6
+    assert index.probe_counts == [1, 1]
 
 
 def test_weighted_rerank_uses_neighbor_distance(monkeypatch) -> None:

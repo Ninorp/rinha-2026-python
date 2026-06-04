@@ -161,10 +161,26 @@ class VectorIndex:
             if cell_score <= 0.5 - self.fast_margin or cell_score >= 0.5 + self.fast_margin:
                 return cell_score
 
-        score = self._score_ivf_probe(query, query_f32, query_norm, center_distances, probes)
+        score, best_ids, best_distances, probed_cells = self._score_ivf_probe(
+            query,
+            query_f32,
+            query_norm,
+            center_distances,
+            probes,
+        )
         deep_probes = min(self.deep_nprobe, self.centroids.shape[0])
         if deep_probes > probes and self._should_deep_score(score):
-            return self._score_ivf_probe(query, query_f32, query_norm, center_distances, deep_probes)
+            deep_score, _, _, _ = self._score_ivf_probe(
+                query,
+                query_f32,
+                query_norm,
+                center_distances,
+                deep_probes,
+                initial_ids=best_ids,
+                initial_distances=best_distances,
+                skip_cells=probed_cells,
+            )
+            return deep_score
         return score
 
     def _score_ivf_probe(
@@ -174,7 +190,10 @@ class VectorIndex:
         query_norm: float,
         center_distances: np.ndarray,
         probes: int,
-    ) -> float:
+        initial_ids: np.ndarray | None = None,
+        initial_distances: np.ndarray | None = None,
+        skip_cells: np.ndarray | None = None,
+    ) -> tuple[float, np.ndarray, np.ndarray, np.ndarray]:
         assert self.offsets is not None
 
         cells = np.argpartition(center_distances, probes - 1)[:probes]
@@ -185,19 +204,40 @@ class VectorIndex:
             order = np.argsort(lower_bounds, kind="stable")
             cells = cells[order]
             lower_bounds = lower_bounds[order]
+        probed_cells = cells
+        if skip_cells is not None and skip_cells.size > 0:
+            scan_mask = ~np.isin(cells, skip_cells)
+            cells = cells[scan_mask]
+            if lower_bounds is not None:
+                lower_bounds = lower_bounds[scan_mask]
 
         neighbors = min(5, self.labels.shape[0])
         candidate_k = self._candidate_k(neighbors)
         if self.batch_cells and use_quantized and lower_bounds is not None:
-            best_ids, visited = self._score_ivf_batched(cells, lower_bounds, quantized, candidate_k)
+            best_ids, best_distances, visited = self._score_ivf_batched(
+                cells,
+                lower_bounds,
+                quantized,
+                candidate_k,
+                initial_ids=initial_ids,
+                initial_distances=initial_distances,
+            )
             if self.probe_counts is not None:
                 self.probe_counts.append(visited)
             if best_ids.size == 0:
-                return self._score_exact(query)
-            return self._score_reranked(query_f32, best_ids, neighbors)
+                return self._score_exact(query), best_ids, best_distances, probed_cells
+            return self._score_reranked(query_f32, best_ids, neighbors), best_ids, best_distances, probed_cells
 
-        best_ids = np.array([], dtype=np.int64)
-        best_distances = np.array([], dtype=np.int32 if use_quantized else np.float32)
+        best_ids = (
+            initial_ids
+            if initial_ids is not None
+            else np.array([], dtype=np.int64)
+        )
+        best_distances = (
+            initial_distances
+            if initial_distances is not None
+            else np.array([], dtype=np.int32 if use_quantized else np.float32)
+        )
 
         visited = 0
         for position, cell in enumerate(cells):
@@ -239,9 +279,9 @@ class VectorIndex:
         if self.probe_counts is not None:
             self.probe_counts.append(visited)
         if best_ids.size == 0:
-            return self._score_exact(query)
+            return self._score_exact(query), best_ids, best_distances, probed_cells
 
-        return self._score_reranked(query_f32, best_ids, neighbors)
+        return self._score_reranked(query_f32, best_ids, neighbors), best_ids, best_distances, probed_cells
 
     def _should_deep_score(self, score: float) -> bool:
         if not self.deep_score_counts:
@@ -258,12 +298,22 @@ class VectorIndex:
         lower_bounds: np.ndarray,
         quantized: np.ndarray | None,
         candidate_k: int,
-    ) -> tuple[np.ndarray, int]:
+        initial_ids: np.ndarray | None = None,
+        initial_distances: np.ndarray | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, int]:
         assert self.offsets is not None
         assert quantized is not None
 
-        best_ids = np.array([], dtype=np.int64)
-        best_distances = np.array([], dtype=np.int32)
+        best_ids = (
+            initial_ids
+            if initial_ids is not None
+            else np.array([], dtype=np.int64)
+        )
+        best_distances = (
+            initial_distances
+            if initial_distances is not None
+            else np.array([], dtype=np.int32)
+        )
         visited = 0
         position = 0
 
@@ -287,13 +337,13 @@ class VectorIndex:
             )
 
         if best_ids.size < candidate_k or position >= cells.shape[0]:
-            return best_ids, visited
+            return best_ids, best_distances, visited
 
         worst = int(np.max(best_distances))
         scan_end = int(np.searchsorted(lower_bounds, worst, side="right"))
         scan_end = max(scan_end, position)
         if scan_end <= position:
-            return best_ids, visited
+            return best_ids, best_distances, visited
 
         ids_parts: list[np.ndarray] = []
         distance_parts: list[np.ndarray] = []
@@ -308,7 +358,7 @@ class VectorIndex:
             distance_parts.append(distances)
 
         if not ids_parts:
-            return best_ids, visited
+            return best_ids, best_distances, visited
 
         ids = np.concatenate(ids_parts)
         distances = np.concatenate(distance_parts)
@@ -321,7 +371,7 @@ class VectorIndex:
             distances[local],
             candidate_k,
         )
-        return best_ids, visited
+        return best_ids, best_distances, visited
 
     def _quantized_cell_distances(
         self,
