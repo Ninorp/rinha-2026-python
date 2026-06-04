@@ -18,6 +18,7 @@ CENTROIDS_FILE = "centroids.f32.npy"
 OFFSETS_FILE = "offsets.i8.npy"
 BOUNDS_FILE = "bounds.u1.npy"
 TREE_FILE = "tree.npz"
+QUERY_TREE_FILE = "query_tree.npz"
 META_FILE = "index.json"
 INDEX_ALGORITHM = "ivf-flat-q8-rerank-f16-cell-prune"
 DEFAULT_CELLS = 4096
@@ -51,6 +52,7 @@ class VectorIndex:
         offsets: np.ndarray | None = None,
         bounds: np.ndarray | None = None,
         tree: dict[str, np.ndarray] | None = None,
+        query_tree: dict[str, np.ndarray] | None = None,
         rerank_vectors: np.ndarray | None = None,
         block_size: int = 65536,
         nprobe: int = DEFAULT_NPROBE,
@@ -85,11 +87,13 @@ class VectorIndex:
         self.offsets = offsets.astype(np.int64, copy=False) if offsets is not None else None
         self.bounds = bounds.astype(np.int16, copy=False) if bounds is not None else None
         self.tree = tree
+        self.query_tree = query_tree
         self.block_size = block_size
         self.nprobe = max(1, nprobe)
         self.fast_margin = float(os.getenv("RINHA_CELL_FAST_MARGIN", str(DEFAULT_FAST_MARGIN)))
         self.rerank_k = max(5, int(os.getenv("RINHA_RERANK_K", str(DEFAULT_RERANK_K))))
         self.tree_confidence = float(os.getenv("RINHA_TREE_CONFIDENCE", str(DEFAULT_TREE_CONFIDENCE)))
+        self.query_tree_confidence = float(os.getenv("RINHA_QUERY_TREE_CONFIDENCE", "0.98"))
         self.cell_prune = env_flag("RINHA_IVF_CELL_PRUNE")
         self.batch_cells = env_flag("RINHA_IVF_BATCH_CELLS")
         self.deep_nprobe = max(0, int(os.getenv("RINHA_IVF_DEEP_NPROBE", "0")))
@@ -97,6 +101,9 @@ class VectorIndex:
         self.weighted_knn = env_flag("RINHA_WEIGHTED_KNN")
         self.weighted_eps = float(os.getenv("RINHA_WEIGHTED_EPS", "0.10"))
         self.score_offset = float(os.getenv("RINHA_SCORE_OFFSET", "0.0"))
+        self.tree_tiebreak = env_flag("RINHA_TREE_TIEBREAK")
+        self.tree_tiebreak_low = float(os.getenv("RINHA_TREE_TIEBREAK_LOW", "0.35"))
+        self.tree_tiebreak_high = float(os.getenv("RINHA_TREE_TIEBREAK_HIGH", "0.65"))
         self.probe_counts: list[int] | None = None
         self.cell_scores = self._build_cell_scores()
         self.vector_norms = self._build_vector_norms()
@@ -104,11 +111,14 @@ class VectorIndex:
     def score(self, query: np.ndarray) -> float:
         if self.labels.shape[0] == 0:
             return 1.0
-        tree_score = self._score_tree(query)
-        if tree_score is not None:
+        query_tree_score = self._score_query_tree(query)
+        if query_tree_score is not None:
+            return query_tree_score
+        tree_score = self._score_tree(query, confident_only=False)
+        if tree_score is not None and self._is_confident_tree_score(tree_score):
             return tree_score
         if self.centroids is not None and self.offsets is not None:
-            return self._score_ivf(query)
+            return self._score_ivf(query, tree_score)
         return self._score_exact(query)
 
     def _score_exact(self, query: np.ndarray) -> float:
@@ -146,7 +156,7 @@ class VectorIndex:
 
         return self._score_reranked(query, best_ids, neighbors)
 
-    def _score_ivf(self, query: np.ndarray) -> float:
+    def _score_ivf(self, query: np.ndarray, tree_score: float | None = None) -> float:
         assert self.centroids is not None
         assert self.offsets is not None
         assert self.centroid_norms is not None
@@ -161,11 +171,27 @@ class VectorIndex:
             if cell_score <= 0.5 - self.fast_margin or cell_score >= 0.5 + self.fast_margin:
                 return cell_score
 
-        score = self._score_ivf_probe(query, query_f32, query_norm, center_distances, probes)
+        score, best_ids, best_distances, probed_cells = self._score_ivf_probe(
+            query,
+            query_f32,
+            query_norm,
+            center_distances,
+            probes,
+        )
         deep_probes = min(self.deep_nprobe, self.centroids.shape[0])
         if deep_probes > probes and self._should_deep_score(score):
-            return self._score_ivf_probe(query, query_f32, query_norm, center_distances, deep_probes)
-        return score
+            deep_score, _, _, _ = self._score_ivf_probe(
+                query,
+                query_f32,
+                query_norm,
+                center_distances,
+                deep_probes,
+                initial_ids=best_ids,
+                initial_distances=best_distances,
+                skip_cells=probed_cells,
+            )
+            return self._score_with_tree_tiebreak(deep_score, tree_score)
+        return self._score_with_tree_tiebreak(score, tree_score)
 
     def _score_ivf_probe(
         self,
@@ -174,7 +200,10 @@ class VectorIndex:
         query_norm: float,
         center_distances: np.ndarray,
         probes: int,
-    ) -> float:
+        initial_ids: np.ndarray | None = None,
+        initial_distances: np.ndarray | None = None,
+        skip_cells: np.ndarray | None = None,
+    ) -> tuple[float, np.ndarray, np.ndarray, np.ndarray]:
         assert self.offsets is not None
 
         cells = np.argpartition(center_distances, probes - 1)[:probes]
@@ -185,19 +214,40 @@ class VectorIndex:
             order = np.argsort(lower_bounds, kind="stable")
             cells = cells[order]
             lower_bounds = lower_bounds[order]
+        probed_cells = cells
+        if skip_cells is not None and skip_cells.size > 0:
+            scan_mask = ~np.isin(cells, skip_cells)
+            cells = cells[scan_mask]
+            if lower_bounds is not None:
+                lower_bounds = lower_bounds[scan_mask]
 
         neighbors = min(5, self.labels.shape[0])
         candidate_k = self._candidate_k(neighbors)
         if self.batch_cells and use_quantized and lower_bounds is not None:
-            best_ids, visited = self._score_ivf_batched(cells, lower_bounds, quantized, candidate_k)
+            best_ids, best_distances, visited = self._score_ivf_batched(
+                cells,
+                lower_bounds,
+                quantized,
+                candidate_k,
+                initial_ids=initial_ids,
+                initial_distances=initial_distances,
+            )
             if self.probe_counts is not None:
                 self.probe_counts.append(visited)
             if best_ids.size == 0:
-                return self._score_exact(query)
-            return self._score_reranked(query_f32, best_ids, neighbors)
+                return self._score_exact(query), best_ids, best_distances, probed_cells
+            return self._score_reranked(query_f32, best_ids, neighbors), best_ids, best_distances, probed_cells
 
-        best_ids = np.array([], dtype=np.int64)
-        best_distances = np.array([], dtype=np.int32 if use_quantized else np.float32)
+        best_ids = (
+            initial_ids
+            if initial_ids is not None
+            else np.array([], dtype=np.int64)
+        )
+        best_distances = (
+            initial_distances
+            if initial_distances is not None
+            else np.array([], dtype=np.int32 if use_quantized else np.float32)
+        )
 
         visited = 0
         for position, cell in enumerate(cells):
@@ -239,9 +289,9 @@ class VectorIndex:
         if self.probe_counts is not None:
             self.probe_counts.append(visited)
         if best_ids.size == 0:
-            return self._score_exact(query)
+            return self._score_exact(query), best_ids, best_distances, probed_cells
 
-        return self._score_reranked(query_f32, best_ids, neighbors)
+        return self._score_reranked(query_f32, best_ids, neighbors), best_ids, best_distances, probed_cells
 
     def _should_deep_score(self, score: float) -> bool:
         if not self.deep_score_counts:
@@ -258,12 +308,22 @@ class VectorIndex:
         lower_bounds: np.ndarray,
         quantized: np.ndarray | None,
         candidate_k: int,
-    ) -> tuple[np.ndarray, int]:
+        initial_ids: np.ndarray | None = None,
+        initial_distances: np.ndarray | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, int]:
         assert self.offsets is not None
         assert quantized is not None
 
-        best_ids = np.array([], dtype=np.int64)
-        best_distances = np.array([], dtype=np.int32)
+        best_ids = (
+            initial_ids
+            if initial_ids is not None
+            else np.array([], dtype=np.int64)
+        )
+        best_distances = (
+            initial_distances
+            if initial_distances is not None
+            else np.array([], dtype=np.int32)
+        )
         visited = 0
         position = 0
 
@@ -287,13 +347,13 @@ class VectorIndex:
             )
 
         if best_ids.size < candidate_k or position >= cells.shape[0]:
-            return best_ids, visited
+            return best_ids, best_distances, visited
 
         worst = int(np.max(best_distances))
         scan_end = int(np.searchsorted(lower_bounds, worst, side="right"))
         scan_end = max(scan_end, position)
         if scan_end <= position:
-            return best_ids, visited
+            return best_ids, best_distances, visited
 
         ids_parts: list[np.ndarray] = []
         distance_parts: list[np.ndarray] = []
@@ -308,7 +368,7 @@ class VectorIndex:
             distance_parts.append(distances)
 
         if not ids_parts:
-            return best_ids, visited
+            return best_ids, best_distances, visited
 
         ids = np.concatenate(ids_parts)
         distances = np.concatenate(distance_parts)
@@ -321,7 +381,7 @@ class VectorIndex:
             distances[local],
             candidate_k,
         )
-        return best_ids, visited
+        return best_ids, best_distances, visited
 
     def _quantized_cell_distances(
         self,
@@ -435,23 +495,24 @@ class VectorIndex:
             norms[start:end] = np.sum(block * block, axis=1)
         return norms
 
-    def _score_tree(self, query: np.ndarray) -> float | None:
+    def _score_with_tree_tiebreak(self, score: float, tree_score: float | None) -> float:
+        if not self.tree_tiebreak or tree_score is None:
+            return score
+        if abs(score - 0.6) < 1e-6 and tree_score <= self.tree_tiebreak_low:
+            return 0.4
+        if abs(score - 0.4) < 1e-6 and tree_score >= self.tree_tiebreak_high:
+            return 0.6
+        return score
+
+    def _is_confident_tree_score(self, score: float) -> bool:
+        return score <= 1.0 - self.tree_confidence or score >= self.tree_confidence
+
+    def _score_tree(self, query: np.ndarray, confident_only: bool = True) -> float | None:
         if self.tree is None:
             return None
 
-        features = self.tree["features"]
-        thresholds = self.tree["thresholds"]
-        scores = self.tree["scores"]
-        left = self.tree["left"]
-        right = self.tree["right"]
-
-        node = 0
-        while features[node] >= 0:
-            feature = int(features[node])
-            node = int(left[node]) if query[feature] <= thresholds[node] else int(right[node])
-
-        score = float(scores[node])
-        if score <= 1.0 - self.tree_confidence or score >= self.tree_confidence:
+        score = score_tree(self.tree, query)
+        if not confident_only or self._is_confident_tree_score(score):
             return score
         return None
 
@@ -474,6 +535,18 @@ class VectorIndex:
         if self.tree is not None:
             for values in self.tree.values():
                 _ = values.shape
+        if self.query_tree is not None:
+            for values in self.query_tree.values():
+                _ = values.shape
+
+    def _score_query_tree(self, query: np.ndarray) -> float | None:
+        if self.query_tree is None:
+            return None
+
+        score = score_tree(self.query_tree, query)
+        if score <= 1.0 - self.query_tree_confidence or score >= self.query_tree_confidence:
+            return score
+        return None
 
 
 def load_index(index_dir: Path) -> VectorIndex:
@@ -502,6 +575,14 @@ def load_index(index_dir: Path) -> VectorIndex:
     if (index_dir / TREE_FILE).exists():
         tree_file = np.load(index_dir / TREE_FILE)
         tree = {key: tree_file[key] for key in tree_file.files}
+    query_tree = None
+    query_tree_file_env = os.getenv("RINHA_QUERY_TREE_FILE")
+    query_tree_path = Path(query_tree_file_env) if query_tree_file_env else index_dir / QUERY_TREE_FILE
+    if not query_tree_path.exists():
+        query_tree_path = index_dir.parent / QUERY_TREE_FILE
+    if query_tree_path.exists():
+        query_tree_file = np.load(query_tree_path)
+        query_tree = {key: query_tree_file[key] for key in query_tree_file.files}
     nprobe = int(os.getenv("RINHA_IVF_NPROBE", str(DEFAULT_NPROBE)))
     return VectorIndex(
         vectors,
@@ -510,6 +591,7 @@ def load_index(index_dir: Path) -> VectorIndex:
         offsets=offsets,
         bounds=bounds,
         tree=tree,
+        query_tree=query_tree,
         rerank_vectors=rerank_vectors,
         nprobe=nprobe,
     )
@@ -573,6 +655,20 @@ def build_index(references_path: Path, index_dir: Path, cells: int | None = None
 
 def empty_index() -> VectorIndex:
     return VectorIndex(np.empty((0, 14), dtype=np.uint8), np.empty(0, dtype=np.uint8))
+
+
+def score_tree(tree: dict[str, np.ndarray], query: np.ndarray) -> float:
+    features = tree["features"]
+    thresholds = tree["thresholds"]
+    scores = tree["scores"]
+    left = tree["left"]
+    right = tree["right"]
+
+    node = 0
+    while features[node] >= 0:
+        feature = int(features[node])
+        node = int(left[node]) if query[feature] <= thresholds[node] else int(right[node])
+    return float(scores[node])
 
 
 def quantize_vectors(vectors: np.ndarray) -> np.ndarray:
