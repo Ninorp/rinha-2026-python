@@ -97,6 +97,9 @@ class VectorIndex:
         self.weighted_knn = env_flag("RINHA_WEIGHTED_KNN")
         self.weighted_eps = float(os.getenv("RINHA_WEIGHTED_EPS", "0.10"))
         self.score_offset = float(os.getenv("RINHA_SCORE_OFFSET", "0.0"))
+        self.tree_tiebreak = env_flag("RINHA_TREE_TIEBREAK")
+        self.tree_tiebreak_low = float(os.getenv("RINHA_TREE_TIEBREAK_LOW", "0.35"))
+        self.tree_tiebreak_high = float(os.getenv("RINHA_TREE_TIEBREAK_HIGH", "0.65"))
         self.probe_counts: list[int] | None = None
         self.cell_scores = self._build_cell_scores()
         self.vector_norms = self._build_vector_norms()
@@ -104,11 +107,11 @@ class VectorIndex:
     def score(self, query: np.ndarray) -> float:
         if self.labels.shape[0] == 0:
             return 1.0
-        tree_score = self._score_tree(query)
-        if tree_score is not None:
+        tree_score = self._score_tree(query, confident_only=False)
+        if tree_score is not None and self._is_confident_tree_score(tree_score):
             return tree_score
         if self.centroids is not None and self.offsets is not None:
-            return self._score_ivf(query)
+            return self._score_ivf(query, tree_score)
         return self._score_exact(query)
 
     def _score_exact(self, query: np.ndarray) -> float:
@@ -146,7 +149,7 @@ class VectorIndex:
 
         return self._score_reranked(query, best_ids, neighbors)
 
-    def _score_ivf(self, query: np.ndarray) -> float:
+    def _score_ivf(self, query: np.ndarray, tree_score: float | None = None) -> float:
         assert self.centroids is not None
         assert self.offsets is not None
         assert self.centroid_norms is not None
@@ -180,8 +183,8 @@ class VectorIndex:
                 initial_distances=best_distances,
                 skip_cells=probed_cells,
             )
-            return deep_score
-        return score
+            return self._score_with_tree_tiebreak(deep_score, tree_score)
+        return self._score_with_tree_tiebreak(score, tree_score)
 
     def _score_ivf_probe(
         self,
@@ -485,7 +488,19 @@ class VectorIndex:
             norms[start:end] = np.sum(block * block, axis=1)
         return norms
 
-    def _score_tree(self, query: np.ndarray) -> float | None:
+    def _score_with_tree_tiebreak(self, score: float, tree_score: float | None) -> float:
+        if not self.tree_tiebreak or tree_score is None:
+            return score
+        if abs(score - 0.6) < 1e-6 and tree_score <= self.tree_tiebreak_low:
+            return 0.4
+        if abs(score - 0.4) < 1e-6 and tree_score >= self.tree_tiebreak_high:
+            return 0.6
+        return score
+
+    def _is_confident_tree_score(self, score: float) -> bool:
+        return score <= 1.0 - self.tree_confidence or score >= self.tree_confidence
+
+    def _score_tree(self, query: np.ndarray, confident_only: bool = True) -> float | None:
         if self.tree is None:
             return None
 
@@ -501,7 +516,7 @@ class VectorIndex:
             node = int(left[node]) if query[feature] <= thresholds[node] else int(right[node])
 
         score = float(scores[node])
-        if score <= 1.0 - self.tree_confidence or score >= self.tree_confidence:
+        if not confident_only or self._is_confident_tree_score(score):
             return score
         return None
 

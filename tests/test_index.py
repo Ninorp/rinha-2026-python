@@ -244,6 +244,66 @@ def test_confident_tree_score_short_circuits_index() -> None:
     assert index.score(np.array([0.9] * 14, dtype=np.float32)) == 1.0
 
 
+def test_tree_tiebreak_can_lower_borderline_ivf_score() -> None:
+    vectors = quantize_vectors(
+        np.array(
+            [
+                [0.00] * 14,
+                [0.01] * 14,
+                [0.02] * 14,
+                [0.03] * 14,
+                [0.04] * 14,
+            ],
+            dtype=np.float32,
+        )
+    )
+    labels = np.array([1, 1, 1, 0, 0], dtype=np.uint8)
+    centroids = np.array([[0.02] * 14], dtype=np.float32)
+    offsets = np.array([0, 5], dtype=np.int64)
+    tree = {
+        "scores": np.array([0.2], dtype=np.float32),
+        "features": np.array([-1], dtype=np.int16),
+        "thresholds": np.array([0.0], dtype=np.float32),
+        "left": np.array([-1], dtype=np.int32),
+        "right": np.array([-1], dtype=np.int32),
+    }
+    index = VectorIndex(vectors, labels, centroids=centroids, offsets=offsets, tree=tree, nprobe=1)
+    index.tree_confidence = 0.9
+    index.tree_tiebreak = True
+
+    assert index.score(np.array([0.02] * 14, dtype=np.float32)) == 0.4
+
+
+def test_tree_tiebreak_can_raise_borderline_ivf_score() -> None:
+    vectors = quantize_vectors(
+        np.array(
+            [
+                [0.00] * 14,
+                [0.01] * 14,
+                [0.02] * 14,
+                [0.03] * 14,
+                [0.04] * 14,
+            ],
+            dtype=np.float32,
+        )
+    )
+    labels = np.array([1, 1, 0, 0, 0], dtype=np.uint8)
+    centroids = np.array([[0.02] * 14], dtype=np.float32)
+    offsets = np.array([0, 5], dtype=np.int64)
+    tree = {
+        "scores": np.array([0.8], dtype=np.float32),
+        "features": np.array([-1], dtype=np.int16),
+        "thresholds": np.array([0.0], dtype=np.float32),
+        "left": np.array([-1], dtype=np.int32),
+        "right": np.array([-1], dtype=np.int32),
+    }
+    index = VectorIndex(vectors, labels, centroids=centroids, offsets=offsets, tree=tree, nprobe=1)
+    index.tree_confidence = 0.9
+    index.tree_tiebreak = True
+
+    assert index.score(np.array([0.02] * 14, dtype=np.float32)) == 0.6
+
+
 def test_index_matches_source_uses_metadata(tmp_path, monkeypatch) -> None:
     references = tmp_path / "references.json"
     references.write_text("[]", encoding="utf-8")
