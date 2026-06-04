@@ -4,7 +4,7 @@ import argparse
 import json
 from pathlib import Path
 
-from rinha_api.config import load_json_or_default, resources_dir
+from rinha_api.config import index_dir, load_json_or_default, resources_dir
 from rinha_api.index import load_index
 from rinha_api.vectorize import DEFAULT_MCC_RISK, DEFAULT_NORMALIZATION, vectorize_payload
 
@@ -16,7 +16,7 @@ def evaluate(
     show_errors: bool,
 ) -> tuple[int, int, int, int, int]:
     resources = resources_dir()
-    index = load_index(resources / "index")
+    index = load_index(index_dir())
     index.nprobe = nprobe
     if disable_tree:
         index.tree = None

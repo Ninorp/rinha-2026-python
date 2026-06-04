@@ -6,7 +6,7 @@ from collections import Counter
 from pathlib import Path
 from time import perf_counter
 
-from rinha_api.config import load_json_or_default, resources_dir
+from rinha_api.config import index_dir, load_json_or_default, resources_dir
 from rinha_api.index import build_quantized_cell_bounds, load_index
 from rinha_api.vectorize import DEFAULT_MCC_RISK, DEFAULT_NORMALIZATION, vectorize_payload
 
@@ -31,7 +31,7 @@ def main() -> None:
     args = parser.parse_args()
 
     resources = resources_dir()
-    index = load_index(resources / "index")
+    index = load_index(index_dir())
     if index.bounds is None:
         if index.centroids is None or index.offsets is None:
             raise SystemExit("index has no IVF cell bounds")
