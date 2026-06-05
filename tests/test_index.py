@@ -60,39 +60,6 @@ def test_pure_cell_score_uses_cell_majority_fast_path() -> None:
     assert index.score(np.array([0.01] * 14, dtype=np.float32)) == 0.0
 
 
-def test_certified_cell_score_falls_back_when_neighbor_cell_can_compete(monkeypatch) -> None:
-    monkeypatch.setenv("RINHA_CELL_FAST_CERTIFY", "1")
-
-    raw_vectors = np.array(
-        [
-            [0.00] * 14,
-            [0.01] * 14,
-            [0.02] * 14,
-            [0.03] * 14,
-            [0.04] * 14,
-            [0.015] * 14,
-            [0.016] * 14,
-            [0.017] * 14,
-            [0.018] * 14,
-            [0.019] * 14,
-        ],
-        dtype=np.float32,
-    )
-    vectors = quantize_vectors(raw_vectors)
-    labels = np.array([0] * 5 + [1] * 5, dtype=np.uint8)
-    centroids = np.array([[0.02] * 14, [0.017] * 14], dtype=np.float32)
-    offsets = np.array([0, 5, 10], dtype=np.int64)
-    bounds = build_quantized_cell_bounds(vectors, centroids, offsets)
-    index = VectorIndex(vectors, labels, centroids=centroids, offsets=offsets, bounds=bounds, nprobe=2)
-    index.cell_prune = True
-
-    query = np.array([0.017] * 14, dtype=np.float32)
-    query_norm = float(np.sum(query * query))
-    center_distances = index.centroid_norms + query_norm - 2.0 * (index.centroids @ query)
-
-    assert index._certified_cell_score(query, center_distances, 0, 0.0) is None
-
-
 def test_cell_prune_skips_distant_cells_without_changing_score() -> None:
     raw_vectors = np.array(
         [

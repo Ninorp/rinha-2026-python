@@ -92,7 +92,6 @@ class VectorIndex:
         self.tree_confidence = float(os.getenv("RINHA_TREE_CONFIDENCE", str(DEFAULT_TREE_CONFIDENCE)))
         self.cell_prune = env_flag("RINHA_IVF_CELL_PRUNE")
         self.batch_cells = env_flag("RINHA_IVF_BATCH_CELLS")
-        self.cell_fast_certify = env_flag("RINHA_CELL_FAST_CERTIFY")
         self.deep_nprobe = max(0, int(os.getenv("RINHA_IVF_DEEP_NPROBE", "0")))
         self.deep_score_counts = env_int_set("RINHA_IVF_DEEP_COUNTS")
         self.weighted_knn = env_flag("RINHA_WEIGHTED_KNN")
@@ -160,11 +159,7 @@ class VectorIndex:
             nearest = int(np.argmin(center_distances))
             cell_score = float(self.cell_scores[nearest])
             if cell_score <= 0.5 - self.fast_margin or cell_score >= 0.5 + self.fast_margin:
-                if not self.cell_fast_certify:
-                    return cell_score
-                certified_score = self._certified_cell_score(query, center_distances, nearest, cell_score)
-                if certified_score is not None:
-                    return certified_score
+                return cell_score
 
         score = self._score_ivf_probe(query, query_f32, query_norm, center_distances, probes)
         deep_probes = min(self.deep_nprobe, self.centroids.shape[0])
@@ -256,39 +251,6 @@ class VectorIndex:
             return False
         fraud_count = int(round(score * neighbors))
         return fraud_count in self.deep_score_counts and abs(score - fraud_count / float(neighbors)) < 1e-6
-
-    def _certified_cell_score(
-        self,
-        query: np.ndarray,
-        center_distances: np.ndarray,
-        nearest: int,
-        cell_score: float,
-    ) -> float | None:
-        if self.bounds is None or self.vectors.dtype != np.uint8:
-            return cell_score
-
-        assert self.offsets is not None
-        start = int(self.offsets[nearest])
-        end = int(self.offsets[nearest + 1])
-        neighbors = min(5, self.labels.shape[0])
-        if end - start < neighbors:
-            return None
-
-        quantized = quantize_vector(query).astype(np.int16, copy=False)
-        distances = self._quantized_cell_distances(start, end, quantized)
-        take = min(neighbors, distances.shape[0])
-        local = np.argpartition(distances, take - 1)[:take]
-        worst = int(np.max(distances[local]))
-
-        probes = min(max(self.nprobe, 2), self.centroids.shape[0])
-        cells = np.argpartition(center_distances, probes - 1)[:probes]
-        cells = cells[cells != nearest]
-        if cells.size == 0:
-            return cell_score
-        lower_bounds = self._cell_lower_bounds(cells, quantized)
-        if lower_bounds is not None and int(np.min(lower_bounds)) > worst:
-            return cell_score
-        return None
 
     def _score_ivf_batched(
         self,

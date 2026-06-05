@@ -47,7 +47,6 @@ services:
       RINHA_INDEX_WARMUP: "1"
       RINHA_IVF_CELL_PRUNE: "1"
       RINHA_IVF_BATCH_CELLS: "1"
-      RINHA_CELL_FAST_CERTIFY: "1"
       RINHA_TREE_CONFIDENCE: "0.90"
       RINHA_CELL_FAST_MARGIN: "0.50"
     deploy:
